@@ -1,0 +1,188 @@
+Metadata-Version: 2.4
+Name: multistate_nn
+Version: 0.1.0
+Summary: Neural network models for multistate processes
+Home-page: https://github.com/yourusername/multistate_nn
+Author: MultiStateNN Contributors
+Author-email: your.email@example.com
+License: MIT
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.0.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.23.0
+Requires-Dist: tqdm>=4.65.0
+Requires-Dist: matplotlib>=3.7.0
+Requires-Dist: seaborn>=0.12.0
+Requires-Dist: networkx>=3.0
+Provides-Extra: bayesian
+Requires-Dist: pyro-ppl>=1.9.0; extra == "bayesian"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.3.1; extra == "dev"
+Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+Requires-Dist: jupyter>=1.0.0; extra == "dev"
+Requires-Dist: ipykernel>=6.0.0; extra == "dev"
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-python
+
+# MultiStateNN: Neural Network Models for Multistate Processes
+
+[![CI](https://github.com/yourusername/multistate_nn/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/multistate_nn/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/multistate-nn.svg)](https://badge.fury.io/py/multistate-nn)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+MultiStateNN is a PyTorch-based package implementing discrete-time multistate models using neural networks. It supports both deterministic and Bayesian inference, making it suitable for modeling state transitions in various applications such as:
+
+- Disease progression modeling
+- Credit risk transitions
+- Career trajectory analysis
+- System degradation modeling
+
+## Features
+
+- Flexible neural network architectures
+- Support for arbitrary state transition structures
+- Temporal smoothing via GRU cells
+- Optional Bayesian inference using Pyro
+- Hierarchical shrinkage for grouped transitions
+- Built-in visualization tools
+
+## Installation
+
+Basic installation:
+```bash
+pip install multistate-nn
+```
+
+With Bayesian inference support:
+```bash
+pip install multistate-nn[bayesian]
+```
+
+For development:
+```bash
+pip install -e ".[dev]"
+```
+
+## Quick Start
+
+```python
+import pandas as pd
+from multistate_nn import fit
+
+# Prepare your data
+data = pd.DataFrame({
+    'time': [0, 0, 1, 1],
+    'from_state': [0, 0, 1, 1],
+    'to_state': [1, 2, 2, 3],
+    'age': [65, 70, 55, 75],
+    'biomarker': [1.2, 0.8, 1.5, 0.9]
+})
+
+# Define model parameters
+covariates = ['age', 'biomarker']
+model = fit(
+    df=data,
+    covariates=covariates,
+    input_dim=len(covariates),
+    hidden_dims=[64, 32],
+    num_states=4,
+    state_transitions={
+        0: [1, 2],    # From state 0, can transition to 1 or 2
+        1: [2, 3],    # From state 1, can transition to 2 or 3
+        2: [3],       # From state 2, can only go to 3
+        3: []         # State 3 is absorbing
+    }
+)
+
+# Make predictions
+import torch
+x_new = torch.tensor([[70, 1.2], [65, 0.8]], dtype=torch.float32)
+probs = model.predict_proba(x_new, time_idx=1, from_state=0)
+print("Transition probabilities:", probs)
+```
+
+## Detailed Documentation
+
+### MultiStateNN Class
+
+The core model class supporting deterministic inference:
+
+```python
+from multistate_nn import MultiStateNN
+
+model = MultiStateNN(
+    input_dim=2,            # Number of covariates
+    hidden_dims=[64, 32],   # Architecture of hidden layers
+    num_states=4,           # Total number of states
+    state_transitions={...}, # Allowed transitions
+    group_structure=None    # Optional grouping for hierarchical shrinkage
+)
+```
+
+### BayesianMultiStateNN Class
+
+Extends MultiStateNN with Bayesian inference via Pyro:
+
+```python
+from multistate_nn import BayesianMultiStateNN
+
+model = BayesianMultiStateNN(
+    input_dim=2,
+    hidden_dims=[64, 32],
+    num_states=4,
+    state_transitions={...}
+)
+```
+
+### Visualization Tools
+
+```python
+from multistate_nn.utils import plot_transition_heatmap, plot_transition_graph
+
+# Plot transition probabilities
+plot_transition_heatmap(model, x, time_idx=0, from_state=0)
+
+# Visualize transition network
+plot_transition_graph(model, x, time_idx=0)
+```
+
+## Examples
+
+See the [examples](examples/) directory for detailed notebooks demonstrating:
+- Disease progression modeling
+- Credit rating transitions
+- System reliability analysis
+
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on how to get started.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Citation
+
+If you use this package in your research, please cite:
+
+```bibtex
+@software{multistate_nn2025,
+    title={MultiStateNN: Neural Network Models for Multistate Processes},
+    author={MultiStateNN Contributors},
+    year={2025},
+    url={https://github.com/yourusername/multistate_nn}
+}
+```
