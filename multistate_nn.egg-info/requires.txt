@@ -16,3 +16,7 @@ black>=23.0.0
 mypy>=1.0.0
 jupyter>=1.0.0
 ipykernel>=6.0.0
+scikit-learn>=1.0.0
+
+[examples]
+scikit-learn>=1.0.0

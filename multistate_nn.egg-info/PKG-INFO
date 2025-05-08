@@ -2,9 +2,9 @@ Metadata-Version: 2.4
 Name: multistate_nn
 Version: 0.1.0
 Summary: Neural network models for multistate processes
-Home-page: https://github.com/yourusername/multistate_nn
-Author: MultiStateNN Contributors
-Author-email: your.email@example.com
+Home-page: https://github.com/denizakdemir/multistate_nn
+Author: Deniz Akdemir
+Author-email: Deniz Akdemir <denizakdemir@gmail.com>
 License: MIT
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Science/Research
@@ -32,15 +32,16 @@ Requires-Dist: black>=23.0.0; extra == "dev"
 Requires-Dist: mypy>=1.0.0; extra == "dev"
 Requires-Dist: jupyter>=1.0.0; extra == "dev"
 Requires-Dist: ipykernel>=6.0.0; extra == "dev"
-Dynamic: author-email
+Requires-Dist: scikit-learn>=1.0.0; extra == "dev"
+Provides-Extra: examples
+Requires-Dist: scikit-learn>=1.0.0; extra == "examples"
+Dynamic: author
 Dynamic: home-page
 Dynamic: license-file
 Dynamic: requires-python
 
 # MultiStateNN: Neural Network Models for Multistate Processes
 
-[![CI](https://github.com/yourusername/multistate_nn/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/multistate_nn/actions/workflows/ci.yml)
-[![PyPI version](https://badge.fury.io/py/multistate-nn.svg)](https://badge.fury.io/py/multistate-nn)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 MultiStateNN is a PyTorch-based package implementing discrete-time multistate models using neural networks. It supports both deterministic and Bayesian inference, making it suitable for modeling state transitions in various applications such as:
@@ -58,6 +59,8 @@ MultiStateNN is a PyTorch-based package implementing discrete-time multistate mo
 - Optional Bayesian inference using Pyro
 - Hierarchical shrinkage for grouped transitions
 - Built-in visualization tools
+- Patient trajectory simulation
+- Cumulative incidence function (CIF) calculations and visualization
 
 ## Installation
 
@@ -69,6 +72,11 @@ pip install multistate-nn
 With Bayesian inference support:
 ```bash
 pip install multistate-nn[bayesian]
+```
+
+With example notebook dependencies:
+```bash
+pip install multistate-nn[examples]
 ```
 
 For development:
@@ -162,9 +170,9 @@ plot_transition_graph(model, x, time_idx=0)
 ## Examples
 
 See the [examples](examples/) directory for detailed notebooks demonstrating:
-- Disease progression modeling
-- Credit rating transitions
-- System reliability analysis
+- Disease progression modeling with synthetic data
+- AIDS progression modeling with real data
+- Trajectory simulation and cumulative incidence functions
 
 ## Contributing
 
@@ -181,8 +189,8 @@ If you use this package in your research, please cite:
 ```bibtex
 @software{multistate_nn2025,
     title={MultiStateNN: Neural Network Models for Multistate Processes},
-    author={MultiStateNN Contributors},
+    author={Akdemir, Deniz},
     year={2025},
-    url={https://github.com/yourusername/multistate_nn}
+    url={https://github.com/denizakdemir/multistate_nn}
 }
 ```

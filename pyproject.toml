@@ -41,7 +41,6 @@ dev = [
     "scikit-learn>=1.0.0",
 ]
 examples = [
-    "pymsm>=0.1.0",
     "scikit-learn>=1.0.0",
 ]
 

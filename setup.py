@@ -16,7 +16,7 @@ setup(
     extras_require={
         "bayesian": ["pyro-ppl>=1.9.0"],
         "dev": ["pytest>=7.3.1", "jupyter>=1.0.0", "scikit-learn>=1.0.0"],
-        "examples": ["pymsm>=0.1.0", "scikit-learn>=1.0.0"],
+        "examples": ["scikit-learn>=1.0.0"],
     },
     python_requires=">=3.9",
     author="Deniz Akdemir",

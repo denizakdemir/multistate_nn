@@ -8,22 +8,25 @@ cd /Users/denizakdemir/Dropbox/dakdemirGithub/GitHubProjects/multistate_nn
 git init
 ```
 
-2. Add all files:
+2. First make sure the GitHub repository exists at: https://github.com/denizakdemir/multistate_nn
+   Create it if it doesn't exist yet.
+
+3. Add all files:
 ```bash
 git add .
 ```
 
-3. Make the first commit:
+4. Make the first commit:
 ```bash
 git commit -m "Initial commit of MultiStateNN: Neural network models for multistate processes"
 ```
 
-4. Add the remote repository:
+5. Add the remote repository:
 ```bash
 git remote add origin git@github.com:denizakdemir/multistate_nn.git
 ```
 
-5. Push to the remote repository:
+6. Push to the remote repository:
 ```bash
 git push -u origin main
 ```
@@ -34,3 +37,13 @@ git branch -M main
 ```
 
 Your project is now ready on GitHub\!
+
+Key features in this commit:
+- A complete implementation of neural network-based multistate models
+- Both deterministic and Bayesian (with Pyro) model variants
+- Simulation functionality for patient trajectories
+- Cumulative incidence function (CIF) calculation and visualization
+- AIDS case study example with synthetic data
+- Comprehensive documentation
+
+After push, you may want to enable GitHub Pages to host the documentation.
