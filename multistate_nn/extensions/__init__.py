@@ -1,0 +1,1 @@
+"""Extensions for MultiStateNN models."""

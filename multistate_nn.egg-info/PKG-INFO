@@ -53,14 +53,15 @@ MultiStateNN is a PyTorch-based package implementing discrete-time multistate mo
 
 ## Features
 
-- Flexible neural network architectures
+- Flexible neural network architectures with shared base classes
 - Support for arbitrary state transition structures
-- Temporal smoothing via GRU cells
-- Optional Bayesian inference using Pyro
+- Simplified temporal effects modeling
+- Optional Bayesian inference using Pyro (via extensions)
 - Hierarchical shrinkage for grouped transitions
 - Built-in visualization tools
 - Patient trajectory simulation
 - Cumulative incidence function (CIF) calculations and visualization
+- Configuration objects for intuitive model and training setup
 
 ## Installation
 
@@ -84,11 +85,36 @@ For development:
 pip install -e ".[dev]"
 ```
 
+## Data
+
+The package includes scripts to download common multistate datasets from R packages. You need to have R and required packages installed on your system first.
+
+To download datasets:
+
+```bash
+# 1. Make the scripts executable
+chmod +x scripts/download_data.py scripts/setup_data.sh
+
+# 2. Run the setup script to install dependencies and download datasets
+./scripts/setup_data.sh
+
+# Alternatively, you can run just the download script:
+python scripts/download_data.py
+```
+
+This will create a `data` folder with datasets commonly used for multistate modeling:
+- CAV (heart transplant data)
+- Bladder cancer recurrence data
+- Primary biliary cirrhosis data
+- AIDS/SI switching data
+
 ## Quick Start
 
 ```python
 import pandas as pd
-from multistate_nn import fit
+import torch
+from multistate_nn import MultiStateNN, fit
+from multistate_nn.train import ModelConfig, TrainConfig
 
 # Prepare your data
 data = pd.DataFrame({
@@ -99,28 +125,85 @@ data = pd.DataFrame({
     'biomarker': [1.2, 0.8, 1.5, 0.9]
 })
 
-# Define model parameters
-covariates = ['age', 'biomarker']
+# Define state transitions
+state_transitions = {
+    0: [1, 2],    # From state 0, can transition to 1 or 2
+    1: [2, 3],    # From state 1, can transition to 2 or 3
+    2: [3],       # From state 2, can only go to 3
+    3: []         # State 3 is absorbing
+}
+
+# Define model configuration
+model_config = ModelConfig(
+    input_dim=2,              # Number of input features
+    hidden_dims=[64, 32],     # Hidden layer dimensions
+    num_states=4,             # Total number of states
+    state_transitions=state_transitions,
+)
+
+# Define training configuration
+train_config = TrainConfig(
+    batch_size=32,
+    epochs=50,
+    learning_rate=0.001
+)
+
+# Fit the model
 model = fit(
     df=data,
-    covariates=covariates,
-    input_dim=len(covariates),
-    hidden_dims=[64, 32],
-    num_states=4,
-    state_transitions={
-        0: [1, 2],    # From state 0, can transition to 1 or 2
-        1: [2, 3],    # From state 1, can transition to 2 or 3
-        2: [3],       # From state 2, can only go to 3
-        3: []         # State 3 is absorbing
-    }
+    covariates=['age', 'biomarker'],
+    model_config=model_config,
+    train_config=train_config
 )
 
 # Make predictions
-import torch
 x_new = torch.tensor([[70, 1.2], [65, 0.8]], dtype=torch.float32)
 probs = model.predict_proba(x_new, time_idx=1, from_state=0)
 print("Transition probabilities:", probs)
 ```
+
+For backward compatibility, you can also use the legacy interface:
+
+```python
+from multistate_nn import fit as fit_legacy
+
+model = fit_legacy(
+    df=data,
+    covariates=['age', 'biomarker'],
+    input_dim=2,
+    hidden_dims=[64, 32],
+    num_states=4,
+    state_transitions=state_transitions,
+    epochs=50
+)
+```
+
+## Architecture
+
+MultiStateNN has a modular architecture composed of:
+
+### Core Model Components
+
+- `BaseMultiStateNN`: Abstract base class providing shared functionality
+- `MultiStateNN`: Deterministic implementation (main model class)
+
+### Extensions
+
+- `BayesianMultiStateNN`: Bayesian implementation (available with Pyro)
+
+### Training Utilities
+
+- `ModelConfig`: Configuration class for model architecture
+- `TrainConfig`: Configuration class for training parameters
+- `fit()`: Unified API for model training
+
+### Utility Functions
+
+The package includes utilities organized into logical groups:
+
+- **Visualization**: Transition heatmaps, network graphs, and CIF plots
+- **Simulation**: Generate synthetic data and trajectories
+- **Analysis**: Cumulative Incidence Functions (CIFs)
 
 ## Detailed Documentation
 
@@ -145,7 +228,7 @@ model = MultiStateNN(
 Extends MultiStateNN with Bayesian inference via Pyro:
 
 ```python
-from multistate_nn import BayesianMultiStateNN
+from multistate_nn.extensions.bayesian import BayesianMultiStateNN
 
 model = BayesianMultiStateNN(
     input_dim=2,
@@ -158,7 +241,10 @@ model = BayesianMultiStateNN(
 ### Visualization Tools
 
 ```python
-from multistate_nn.utils import plot_transition_heatmap, plot_transition_graph
+from multistate_nn.utils.visualization import (
+    plot_transition_heatmap, 
+    plot_transition_graph
+)
 
 # Plot transition probabilities
 plot_transition_heatmap(model, x, time_idx=0, from_state=0)

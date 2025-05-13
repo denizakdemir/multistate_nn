@@ -12,3 +12,4 @@ multistate_nn.egg-info/dependency_links.txt
 multistate_nn.egg-info/requires.txt
 multistate_nn.egg-info/top_level.txt
 tests/test_multistate_nn.py
+tests/test_new_features.py

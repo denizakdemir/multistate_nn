@@ -1,7 +1,16 @@
-"""MultiStateNN: Neural network-based multistate models."""
+"""MultiStateNN: Neural Network Models for Multistate Processes."""
 
-from .models import MultiStateNN, BayesianMultiStateNN
-from .train import fit, prepare_data, train_deterministic, train_bayesian
+# Import core models
+from .models import BaseMultiStateNN, MultiStateNN
+
+# Import training utilities
+from .train import (
+    fit,
+    ModelConfig,
+    TrainConfig,
+)
+
+# Import utility functions
 from .utils import (
     plot_transition_heatmap,
     plot_transition_graph, 
@@ -14,18 +23,27 @@ from .utils import (
     compare_cifs,
 )
 
-__version__ = "0.1.0"
+# Try to import Bayesian extension
+try:
+    from .extensions.bayesian import BayesianMultiStateNN
+    has_bayesian = True
+except ImportError:
+    has_bayesian = False
 
+# fit is the primary interface for training models
+
+__version__ = "0.2.0"
+
+# Define exports
 __all__ = [
     # Core models
+    "BaseMultiStateNN",
     "MultiStateNN",
-    "BayesianMultiStateNN",
     
-    # Training functions
+    # Training utilities
     "fit",
-    "prepare_data",
-    "train_deterministic",
-    "train_bayesian",
+    "ModelConfig",
+    "TrainConfig",
     
     # Visualization utilities
     "plot_transition_heatmap",
@@ -42,3 +60,7 @@ __all__ = [
     "plot_cif",
     "compare_cifs",
 ]
+
+# Add BayesianMultiStateNN to exports if available
+if has_bayesian:
+    __all__.append("BayesianMultiStateNN")
