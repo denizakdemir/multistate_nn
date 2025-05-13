@@ -42,6 +42,29 @@ For development:
 pip install -e ".[dev]"
 ```
 
+## Data
+
+The package includes scripts to download common multistate datasets from R packages. You need to have R and required packages installed on your system first.
+
+To download datasets:
+
+```bash
+# 1. Make the scripts executable
+chmod +x scripts/download_data.py scripts/setup_data.sh
+
+# 2. Run the setup script to install dependencies and download datasets
+./scripts/setup_data.sh
+
+# Alternatively, you can run just the download script:
+python scripts/download_data.py
+```
+
+This will create a `data` folder with datasets commonly used for multistate modeling:
+- CAV (heart transplant data)
+- Bladder cancer recurrence data
+- Primary biliary cirrhosis data
+- AIDS/SI switching data
+
 ## Quick Start
 
 ```python
