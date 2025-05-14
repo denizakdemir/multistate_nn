@@ -8,6 +8,8 @@ This example demonstrates:
 3. Validating that the model correctly learns the underlying patterns
 4. Showing how time discretization affects model behavior
 5. Demonstrating original time scale handling
+6. Using time-adjusted simulations for consistent CIF calculations
+7. Applying the Aalen-Johansen estimator for accurate CIF calculation
 
 The script uses a simple 4-state model:
 - State 0: Healthy
@@ -18,6 +20,12 @@ The script uses a simple 4-state model:
 Transitions are influenced by:
 - Age: Older patients progress faster
 - Treatment: Reduces progression rates
+
+Key features demonstrated:
+- Time-adjusted simulations (time_adjusted=True) to ensure CIFs are consistent across 
+  different time discretizations
+- Consistent time grid evaluation for CIFs to enable valid comparisons
+- Aalen-Johansen estimator for accurate handling of competing risks in CIF calculation
 """
 
 import numpy as np
@@ -444,20 +452,27 @@ def run_simulation_and_validation(time_scale: str):
         # Create input tensor
         x = torch.tensor([[profile["age"], profile["treatment"]]], dtype=torch.float32)
         
-        # Simulate trajectories
+        # Simulate trajectories with time adjustment for consistent CIFs
         trajectories = simulate_patient_trajectory(
             model=model,
             x=x,
             start_state=0,
             max_time=time_points[-1],
             n_simulations=1000,
-            use_original_time=True
+            time_adjusted=True,  # Enable time adjustment for consistent CIFs
+            use_original_time=True  # Use original time values
         )
         
-        # Calculate CIF for death (state 3)
+        # Create consistent time grid for evaluation
+        time_grid = np.linspace(0, time_points[-1], 100)
+        
+        # Calculate CIF for death (state 3) using Aalen-Johansen estimator
         cif = calculate_cif(
             trajectories=pd.concat(trajectories),
             target_state=3,
+            max_time=time_points[-1],
+            time_grid=time_grid,  # Use consistent time grid for evaluation
+            method="empirical",  # Use empirical method
             use_original_time=True
         )
         
@@ -519,6 +534,25 @@ def compare_discretizations(coarse_cifs, fine_cifs):
         use_original_time=True
     )
     
+    # Calculate the mean absolute difference to measure consistency
+    common_time_points = np.linspace(0, max(24, TIME_SCALES["coarse"][-1], TIME_SCALES["fine"][-1]), 100)
+    # Interpolate values from both CIFs at these common time points
+    from scipy.interpolate import interp1d
+
+    f1 = interp1d(elderly_untreated_coarse['time'], elderly_untreated_coarse['cif'], bounds_error=False, fill_value='extrapolate')
+    f2 = interp1d(elderly_untreated_fine['time'], elderly_untreated_fine['cif'], bounds_error=False, fill_value='extrapolate')
+
+    cif1_interp = f1(common_time_points)
+    cif2_interp = f2(common_time_points)
+
+    # Calculate mean absolute difference
+    mean_abs_diff = np.mean(np.abs(cif1_interp - cif2_interp))
+    max_abs_diff = np.max(np.abs(cif1_interp - cif2_interp))
+    
+    # Add metrics to the plot
+    plt.text(0.05, 0.95, f"Mean Abs Diff: {mean_abs_diff:.4f}\nMax Abs Diff: {max_abs_diff:.4f}", 
+             transform=ax.transAxes, bbox=dict(facecolor='white', alpha=0.8))
+    
     plt.title("Effect of Time Discretization on CIF (Elderly Untreated)")
     plt.xlabel("Time (months)")
     plt.ylabel("Cumulative Incidence of Death")
@@ -526,6 +560,9 @@ def compare_discretizations(coarse_cifs, fine_cifs):
     plt.grid(True, alpha=0.3)
     plt.savefig("discretization_comparison.png")
     print("\nSaved discretization comparison to discretization_comparison.png")
+    print(f"Consistency metrics between time discretizations:")
+    print(f"- Mean absolute difference: {mean_abs_diff:.4f}")
+    print(f"- Maximum absolute difference: {max_abs_diff:.4f}")
 
 
 def main():

@@ -349,24 +349,62 @@ def simulate_patient_trajectory(
                 
                 # Adjust probabilities for time window size
                 if time_diff > 1.0 and len(next_states) > 1:
-                    # Apply time window adjustment to simulate proper cumulative effect
-                    # For a coarse discretization with larger time windows, we use:
-                    # p' = 1 - (1-p)^time_diff
-                    # This simulates the cumulative effect of taking multiple steps
+                    # First, identify the self-transition probability (if any)
+                    self_transition_idx = None
+                    for i, next_state in enumerate(next_states):
+                        if next_state == current_state:
+                            self_transition_idx = i
+                            break
                     
-                    # Convert to rates (per unit time) for proper scaling
-                    # Rate = -log(1-p)
-                    rates = -np.log(1.0 - probs)
-                    
-                    # Scale rates by time difference
-                    scaled_rates = rates * time_diff
-                    
-                    # Convert back to probabilities
-                    adjusted_probs = 1.0 - np.exp(-scaled_rates)
-                    
-                    # Renormalize to ensure sum = 1
-                    adjusted_probs = adjusted_probs / adjusted_probs.sum()
-                    probs = adjusted_probs
+                    # Apply different time-adjustment methods based on the structure
+                    if self_transition_idx is not None:
+                        # Method 1: When there are self-transitions, we use the continuous-time
+                        # Markov process conversion to adjust probabilities
+                        
+                        # Extract the probability of staying in current state
+                        p_stay = probs[self_transition_idx]
+                        
+                        # Calculate the effective exit rate from this state
+                        if p_stay < 1.0:
+                            # Convert to rate using lambda = -ln(p_stay)
+                            exit_rate = -np.log(p_stay)
+                            
+                            # Scale rate by time difference
+                            scaled_exit_rate = exit_rate * time_diff
+                            
+                            # Calculate new staying probability
+                            new_p_stay = np.exp(-scaled_exit_rate)
+                            
+                            # Calculate scaling factor for other transitions
+                            scaling_factor = (1.0 - new_p_stay) / (1.0 - p_stay)
+                            
+                            # Create adjusted probabilities
+                            adjusted_probs = probs.copy()
+                            adjusted_probs[self_transition_idx] = new_p_stay
+                            
+                            # Scale other transition probabilities
+                            for i in range(len(probs)):
+                                if i != self_transition_idx:
+                                    adjusted_probs[i] = probs[i] * scaling_factor
+                            
+                            # Use adjusted probabilities
+                            probs = adjusted_probs
+                    else:
+                        # Method 2: For transitions without self-transitions, we use a different approach
+                        # Convert to rates using -log(1-p) formula
+                        rates = -np.log(1.0 - probs)
+                        
+                        # Scale rates by time difference
+                        scaled_rates = rates * time_diff
+                        
+                        # Convert back to probabilities
+                        adjusted_probs = 1.0 - np.exp(-scaled_rates)
+                        
+                        # Renormalize to ensure sum = 1
+                        if adjusted_probs.sum() > 0:
+                            adjusted_probs = adjusted_probs / adjusted_probs.sum()
+                        
+                        probs = adjusted_probs
                 
             # Choose next state based on probabilities
             next_state_idx = np.random.choice(len(next_states), p=probs)

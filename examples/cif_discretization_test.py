@@ -252,7 +252,8 @@ def calculate_and_compare_cifs(fine_trajectories, coarse_trajectories, max_obser
             target_state=target_state, 
             time_grid=time_grid,
             max_time=max_observed_time,  # Explicitly limit to observed time range
-            ci_level=ci_level  # Explicitly set confidence level
+            ci_level=ci_level,  # Explicitly set confidence level
+            method="empirical"  # Use empirical method
         )
         
         coarse_cif = calculate_cif(
@@ -260,7 +261,8 @@ def calculate_and_compare_cifs(fine_trajectories, coarse_trajectories, max_obser
             target_state=target_state, 
             time_grid=time_grid,
             max_time=max_observed_time,  # Explicitly limit to observed time range
-            ci_level=ci_level  # Explicitly set confidence level
+            ci_level=ci_level,  # Explicitly set confidence level
+            method="empirical"  # Use empirical method
         )
         
         # Plot in a subplot
@@ -324,14 +326,16 @@ def calculate_and_compare_cifs(fine_trajectories, coarse_trajectories, max_obser
             fine_trajectories, 
             target_state=target_state, 
             time_grid=time_grid,
-            max_time=max_observed_time
+            max_time=max_observed_time,
+            method="empirical"  # Use empirical method
         )
         
         coarse_cif = calculate_cif(
             coarse_trajectories, 
             target_state=target_state, 
             time_grid=time_grid,
-            max_time=max_observed_time
+            max_time=max_observed_time,
+            method="empirical"  # Use empirical method
         )
         
         mean_diff = np.mean(np.abs(fine_cif['cif'].values - coarse_cif['cif'].values))
@@ -347,14 +351,16 @@ def calculate_and_compare_cifs(fine_trajectories, coarse_trajectories, max_obser
         fine_trajectories, 
         target_state=absorbing_state, 
         time_grid=time_grid,
-        max_time=max_observed_time
+        max_time=max_observed_time,
+        method="empirical"  # Use empirical method
     )
     
     coarse_cif_abs = calculate_cif(
         coarse_trajectories, 
         target_state=absorbing_state, 
         time_grid=time_grid,
-        max_time=max_observed_time
+        max_time=max_observed_time,
+        method="empirical"  # Use empirical method
     )
     
     mean_diff_abs = np.mean(np.abs(fine_cif_abs['cif'].values - coarse_cif_abs['cif'].values))

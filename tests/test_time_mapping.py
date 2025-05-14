@@ -331,21 +331,24 @@ def test_cif_with_custom_time():
         all_trajectories, 
         target_state=target_state, 
         time_grid=original_grid,
-        max_time=max_time
+        max_time=max_time,
+        method="empirical"
     )
     
     cif_dense = calculate_cif(
         all_trajectories, 
         target_state=target_state, 
         time_grid=dense_grid,
-        max_time=max_time
+        max_time=max_time,
+        method="empirical"
     )
     
     cif_sparse = calculate_cif(
         all_trajectories, 
         target_state=target_state, 
         time_grid=sparse_grid,
-        max_time=max_time
+        max_time=max_time,
+        method="empirical"
     )
     
     # Check that CIFs have the expected structure
@@ -491,14 +494,16 @@ def test_cif_discretization_consistency():
         fine_df, 
         target_state=target_state, 
         time_grid=common_grid,
-        max_time=max_observed_time
+        max_time=max_observed_time,
+        method="empirical"
     )
     
     coarse_cif = calculate_cif(
         coarse_df, 
         target_state=target_state, 
         time_grid=common_grid,
-        max_time=max_observed_time
+        max_time=max_observed_time,
+        method="empirical"
     )
     
     # Check that both CIFs have the expected structure

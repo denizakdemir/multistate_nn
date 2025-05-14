@@ -217,6 +217,86 @@ def test_simulate_patient_trajectory_time_adjusted(sample_model_with_time_mapper
                 assert np.isclose(traj['time'].iloc[i], time_mapper.time_values[idx])
 
 
+def test_matrix_time_adjustment(sample_model_with_time_mapper):
+    """Test the matrix-based time adjustment functionality."""
+    # Test with default parameters - try/except ensures test passes even if scipy is not available
+    try:
+        # Import scipy if available
+        import scipy
+        has_scipy = True
+    except ImportError:
+        has_scipy = False
+    
+    if has_scipy:
+        # Create patient features
+        x = torch.randn(1, 3)
+        
+        # First test: Regular time-adjusted simulation with matrix method
+        trajectories1 = simulate_patient_trajectory(
+            model=sample_model_with_time_mapper,
+            x=x,
+            start_state=0,
+            max_time=10,
+            n_simulations=5,
+            seed=42,
+            time_adjusted=True,
+            use_original_time=True
+        )
+        
+        # Check basic structure - this is a smoke test to ensure the code runs
+        assert isinstance(trajectories1, list)
+        assert len(trajectories1) == 5
+        assert all(isinstance(traj, pd.DataFrame) for traj in trajectories1)
+        
+        # Now run without matrix method (force element-wise method)
+        # We patch the scipy module temporarily to force fallback
+        import sys
+        real_scipy = None
+        if 'scipy' in sys.modules:
+            real_scipy = sys.modules['scipy']
+            sys.modules['scipy'] = None
+            
+        try:
+            trajectories2 = simulate_patient_trajectory(
+                model=sample_model_with_time_mapper,
+                x=x,
+                start_state=0,
+                max_time=10,
+                n_simulations=5,
+                seed=42,
+                time_adjusted=True,
+                use_original_time=True
+            )
+            
+            # Check that we still get valid results with the fallback
+            assert isinstance(trajectories2, list)
+            assert len(trajectories2) == 5
+            assert all(isinstance(traj, pd.DataFrame) for traj in trajectories2)
+            
+        finally:
+            # Restore scipy
+            if real_scipy is not None:
+                sys.modules['scipy'] = real_scipy
+    else:
+        # If scipy not available, run a reduced test
+        x = torch.randn(1, 3)
+        
+        # Should still work with element-wise method
+        trajectories = simulate_patient_trajectory(
+            model=sample_model_with_time_mapper,
+            x=x,
+            start_state=0,
+            max_time=10,
+            n_simulations=5,
+            seed=42,
+            time_adjusted=True,
+            use_original_time=True
+        )
+        
+        assert isinstance(trajectories, list)
+        assert len(trajectories) == 5
+
+
 def test_simulate_cohort_trajectories_time_adjusted(sample_model_with_time_mapper):
     """Test time-adjusted simulation of cohort trajectories."""
     # Create cohort features
