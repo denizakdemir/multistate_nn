@@ -18,10 +18,14 @@ from .utils import (
     generate_synthetic_data,
     simulate_patient_trajectory,
     simulate_cohort_trajectories,
+    generate_censoring_times,
     calculate_cif,
     plot_cif,
     compare_cifs,
 )
+
+# Import time mapping utilities
+from .utils.time_mapping import TimeMapper
 
 # Try to import Bayesian extension
 try:
@@ -52,6 +56,7 @@ __all__ = [
     
     # Data generation
     "generate_synthetic_data",
+    "generate_censoring_times",
     
     # Simulation and prediction 
     "simulate_patient_trajectory",
@@ -59,6 +64,9 @@ __all__ = [
     "calculate_cif",
     "plot_cif",
     "compare_cifs",
+    
+    # Time mapping utilities
+    "TimeMapper",
 ]
 
 # Add BayesianMultiStateNN to exports if available

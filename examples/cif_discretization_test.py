@@ -10,10 +10,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 from multistate_nn import fit, ModelConfig, TrainConfig
-from multistate_nn.utils.simulation import generate_synthetic_data, simulate_cohort_trajectories
-from multistate_nn.utils.analysis import calculate_cif
-from multistate_nn.utils.visualization import compare_cifs
-from multistate_nn.utils.time_mapping import TimeMapper
+from multistate_nn.utils import (
+    generate_synthetic_data,
+    simulate_cohort_trajectories,
+    calculate_cif,
+    compare_cifs,
+    TimeMapper
+)
 
 # Set random seeds for reproducibility
 np.random.seed(42)

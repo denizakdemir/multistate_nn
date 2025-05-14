@@ -1,4 +1,4 @@
-"""Tests for new features and refactored architecture."""
+"""Tests for MultiStateNN model architecture."""
 
 import pytest
 import torch
@@ -6,8 +6,7 @@ import pandas as pd
 import numpy as np
 from multistate_nn import (
     BaseMultiStateNN,
-    MultiStateNN, 
-    fit_legacy, 
+    MultiStateNN,
     ModelConfig, 
     TrainConfig
 )
@@ -110,34 +109,6 @@ def test_config_objects(sample_data, model_config, train_config):
     assert model.input_dim == model_config.input_dim
     assert model.num_states == model_config.num_states
     assert model.state_transitions == model_config.state_transitions
-
-
-def test_legacy_compatibility(sample_data, model_config):
-    """Test that the legacy fit function maintains backward compatibility."""
-    covariates = ["age", "sex", "biomarker"]
-    
-    # Use legacy fit
-    legacy_model = fit_legacy(
-        df=sample_data,
-        covariates=covariates,
-        input_dim=model_config.input_dim,
-        hidden_dims=model_config.hidden_dims,
-        num_states=model_config.num_states,
-        state_transitions=model_config.state_transitions,
-        epochs=2  # Small for fast testing
-    )
-    
-    assert isinstance(legacy_model, MultiStateNN)
-    assert legacy_model.input_dim == model_config.input_dim
-    assert legacy_model.num_states == model_config.num_states
-    
-    # Make predictions
-    x = torch.randn(5, model_config.input_dim)
-    probs = legacy_model.predict_proba(x, time_idx=0, from_state=0)
-    
-    assert probs.shape == (5, len(model_config.state_transitions[0]))
-    assert torch.all(probs >= 0) and torch.all(probs <= 1)
-    assert torch.allclose(probs.sum(dim=1), torch.ones(5))
 
 
 def test_vectorized_training(sample_data, model_config, train_config):

@@ -1,6 +1,15 @@
-"""Utility functions for MultiStateNN models."""
+"""Utility functions for MultiStateNN models.
 
-from typing import Optional, Dict, List, Tuple, Union, Sequence
+This module is deprecated and will be removed in a future version.
+All functions have been moved to specialized modules:
+- Visualization: multistate_nn.utils.visualization
+- Simulation: multistate_nn.utils.simulation
+- Analysis: multistate_nn.utils.analysis
+"""
+
+import warnings
+import functools
+from typing import Optional, Dict, List, Tuple, Union, Sequence, Callable, Any
 import numpy as np
 import pandas as pd
 import torch
@@ -8,7 +17,22 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from .models import MultiStateNN
 
+def deprecated(func: Callable) -> Callable:
+    """Decorator to mark functions as deprecated."""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        warnings.warn(
+            f"Function {func.__name__} in multistate_nn.utils is deprecated and will be "
+            f"removed in a future version. Use multistate_nn.utils.visualization, "
+            f"multistate_nn.utils.simulation, or multistate_nn.utils.analysis instead.",
+            category=DeprecationWarning,
+            stacklevel=2
+        )
+        return func(*args, **kwargs)
+    return wrapper
 
+
+@deprecated
 def plot_transition_heatmap(
     model: MultiStateNN,
     x: torch.Tensor,
@@ -57,6 +81,7 @@ def plot_transition_heatmap(
     return ax
 
 
+@deprecated
 def compute_transition_matrix(
     model: MultiStateNN,
     x: torch.Tensor,
@@ -93,6 +118,7 @@ def compute_transition_matrix(
     return P
 
 
+@deprecated
 def plot_transition_graph(
     model: MultiStateNN,
     x: torch.Tensor,
@@ -161,6 +187,7 @@ def plot_transition_graph(
     return fig, ax
 
 
+@deprecated
 def generate_synthetic_data(
     n_samples: int = 1000,
     n_covariates: int = 3,
@@ -235,6 +262,7 @@ def generate_synthetic_data(
     return pd.DataFrame(records)
 
 
+@deprecated
 def simulate_patient_trajectory(
     model: MultiStateNN,
     x: torch.Tensor,
@@ -321,6 +349,7 @@ def simulate_patient_trajectory(
     return trajectories
 
 
+@deprecated
 def simulate_cohort_trajectories(
     model: MultiStateNN,
     cohort_features: torch.Tensor,
@@ -384,6 +413,7 @@ def simulate_cohort_trajectories(
     return pd.concat(all_trajectories, ignore_index=True)
 
 
+@deprecated
 def calculate_cif(
     trajectories: pd.DataFrame,
     target_state: int,
@@ -449,6 +479,7 @@ def calculate_cif(
         return _calculate_single_cif(trajectories, target_state, max_time, ci_level)
 
 
+@deprecated
 def _calculate_single_cif(
     trajectories: pd.DataFrame,
     target_state: int,
@@ -500,6 +531,7 @@ def _calculate_single_cif(
     return cif_df
 
 
+@deprecated
 def plot_cif(
     cif_df: pd.DataFrame,
     ax: Optional[plt.Axes] = None,
@@ -560,6 +592,7 @@ def plot_cif(
     return ax
 
 
+@deprecated
 def compare_cifs(
     cif_list: List[pd.DataFrame],
     labels: List[str],
