@@ -349,6 +349,125 @@ def simulate_patient_trajectory(
                 
                 # Adjust probabilities for time window size
                 if time_diff > 1.0 and len(next_states) > 1:
+                    try:
+                        # Try using matrix exponential method for more accurate time adjustment
+                        # This requires scipy, but will fall back to element-wise methods if unavailable
+                        from scipy import linalg
+                        
+                        # Construct full transition matrix for all states in the model
+                        # This is more accurate than just using the visible next states
+                        all_states = set([current_state] + next_states)
+                        for s in model.state_transitions:
+                            all_states.add(s)
+                            all_states.update(model.state_transitions[s])
+                        
+                        all_states = sorted(list(all_states))
+                        n_all_states = len(all_states)
+                        state_to_idx = {s: i for i, s in enumerate(all_states)}
+                        
+                        # Create transition matrix P (initialize as identity matrix for all states)
+                        P = np.eye(n_all_states)
+                        
+                        # Fill in transitions from current state based on calculated probs
+                        curr_idx = state_to_idx[current_state]
+                        for i, next_state in enumerate(next_states):
+                            next_idx = state_to_idx[next_state]
+                            P[curr_idx, next_idx] = probs[i]
+                        
+                        # Convert P to rate matrix Q using matrix logarithm
+                        try:
+                            Q = linalg.logm(P)
+                            
+                            # Scale Q by time difference
+                            Q_scaled = Q * time_diff
+                            
+                            # Convert back to probability matrix using matrix exponential
+                            P_adjusted = linalg.expm(Q_scaled)
+                            
+                            # Extract adjusted probabilities for next states
+                            adjusted_probs = np.array([
+                                P_adjusted[curr_idx, state_to_idx[ns]] for ns in next_states
+                            ])
+                            
+                            # Ensure valid probability vector
+                            adjusted_probs = np.clip(adjusted_probs, 0, 1)
+                            if adjusted_probs.sum() > 0:
+                                adjusted_probs = adjusted_probs / adjusted_probs.sum()
+                            
+                            probs = adjusted_probs
+                        except (np.linalg.LinAlgError, ValueError, OverflowError) as e:
+                            # Fall back to element-wise method on matrix method failure
+                            # This happens most commonly with ill-conditioned matrices
+                            raise RuntimeError("Matrix method failed, falling back to element-wise") from e
+                    
+                    except (ImportError, RuntimeError):
+                        # Fall back to element-wise methods when scipy is not available
+                        # or when the matrix method fails (numerical issues, etc.)
+                        
+                        # Check if we have a self-transition
+                        self_transition_idx = None
+                        for i, next_state in enumerate(next_states):
+                            if next_state == current_state:
+                                self_transition_idx = i
+                                break
+                        
+                        # Use different adjustment methods based on transition structure
+                        if self_transition_idx is not None:
+                            # Extract the probability of staying in current state
+                            p_stay = probs[self_transition_idx]
+                            
+                            # Method for models with self-transitions
+                            if p_stay < 1.0:  # Only adjust if there's a non-zero probability of leaving
+                                # Convert self-transition to exit rate
+                                exit_rate = -np.log(p_stay)
+                                
+                                # Scale rate by time difference
+                                scaled_exit_rate = exit_rate * time_diff
+                                
+                                # New probability of staying
+                                new_p_stay = np.exp(-scaled_exit_rate)
+                                
+                                # Total probability of leaving current state
+                                total_leaving_prob = 1.0 - new_p_stay
+                                
+                                # Create new probability vector
+                                adjusted_probs = np.zeros_like(probs)
+                                adjusted_probs[self_transition_idx] = new_p_stay
+                                
+                                # Distribute remaining probability mass for non-self transitions
+                                # proportionally to their original values
+                                remaining_probs = np.array([
+                                    probs[i] for i in range(len(probs)) if i != self_transition_idx
+                                ])
+                                
+                                if sum(remaining_probs) > 0:  # Avoid division by zero
+                                    remaining_ratios = remaining_probs / sum(remaining_probs)
+                                    idx = 0
+                                    for i in range(len(probs)):
+                                        if i != self_transition_idx:
+                                            adjusted_probs[i] = total_leaving_prob * remaining_ratios[idx]
+                                            idx += 1
+                                
+                                probs = adjusted_probs
+                        else:
+                            # Method for models without self-transitions
+                            # Convert to rates (per unit time)
+                            rates = -np.log(1.0 - np.array(probs))
+                            
+                            # Scale rates by time difference
+                            scaled_rates = rates * time_diff
+                            
+                            # Convert back to probabilities
+                            adjusted_probs = 1.0 - np.exp(-scaled_rates)
+                            
+                            # Ensure probabilities sum to 1
+                            if adjusted_probs.sum() > 0:
+                                adjusted_probs = adjusted_probs / adjusted_probs.sum()
+                            
+                            probs = adjusted_probs
+                    
+                    # The old complex method is commented out below:
+                    """
                     # First, identify the self-transition probability (if any)
                     self_transition_idx = None
                     for i, next_state in enumerate(next_states):
@@ -405,6 +524,7 @@ def simulate_patient_trajectory(
                             adjusted_probs = adjusted_probs / adjusted_probs.sum()
                         
                         probs = adjusted_probs
+                    """
                 
             # Choose next state based on probabilities
             next_state_idx = np.random.choice(len(next_states), p=probs)

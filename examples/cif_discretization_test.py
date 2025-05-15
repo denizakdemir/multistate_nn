@@ -24,20 +24,19 @@ torch.manual_seed(42)
 
 # 1. Generate synthetic data with different time discretizations
 def generate_test_data():
-    """Generate synthetic data with two different time discretizations."""
-    # Define minimal parameters for quick demonstration
-    n_samples = 100  # Just enough samples to demonstrate the concept
-    n_covariates = 2  # Fewer covariates for speed
+    """Generate synthetic data with two different time discretizations from the same continuous-time process."""
+    # Define parameters
+    n_samples = 1000
+    n_covariates = 2
     n_states = 4
     
-    # Return these values for use in other functions
+    # Return these values for later use
     global_params = {
         'n_covariates': n_covariates,
         'n_states': n_states
     }
     
-    # Define a modified transition structure with much lower transition probabilities
-    # This ensures patients take longer to reach the absorbing state
+    # Define state transition structure
     state_transitions = {
         0: [1, 0],     # Allow self-transitions and transitions to state 1
         1: [2, 1],     # Allow self-transitions and transitions to state 2
@@ -45,95 +44,148 @@ def generate_test_data():
         3: []          # Absorbing state
     }
     
-    # Fine time discretization (monthly intervals)
-    fine_time_values = np.array([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360])  # 13 monthly points
+    # Define time grids for discretization
+    fine_time_values = np.array([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360])
+    coarse_time_values = np.array([0, 90, 180, 270, 360])
     
-    # Use consistent random seed
+    # Set consistent random seed
     np.random.seed(42)
     torch.manual_seed(42)
     
-    # Custom function to generate data with FIXED transition probabilities
-    # This ensures we have very slow progression through states
-    def generate_fixed_prob_data(time_values, n_samples, low_prob=0.1):
-        """Generate synthetic multistate data with fixed, low transition probabilities."""
-        records = []
+    # Generate covariates
+    X = np.random.normal(0, 1, (n_samples, n_covariates))
+    
+    # Define hazard rates (continuous-time transition rates)
+    # These determine the probability of transitioning in the continuous-time process
+    hazard_rates = {
+        0: 0.003,  # Rate of transitioning from state 0 to state 1
+        1: 0.005,  # Rate of transitioning from state 1 to state 2
+        2: 0.007   # Rate of transitioning from state 2 to state 3
+    }
+    
+    # Generate continuous-time trajectories for each patient
+    continuous_trajectories = []
+    
+    for i in range(n_samples):
+        current_state = 0
+        current_time = 0
+        patient_trajectory = [(current_time, current_state, current_state)]  # (time, from_state, to_state)
         
-        # Generate covariates
-        X = np.random.normal(0, 1, (n_samples, n_covariates))
-        
-        for i in range(n_samples):
-            current_state = 0  # All patients start in state 0
+        while current_time < 360 and current_state < 3:  # Until max time or absorbing state
+            # Time until next event follows exponential distribution with rate parameter
+            rate = hazard_rates[current_state]
+            time_to_event = np.random.exponential(1/rate)
             
-            for t_idx in range(len(time_values) - 1):  # We go through ALL time points
-                if current_state == 3:  # If in absorbing state
-                    # Don't record self-transitions for the absorbing state
-                    continue
+            # New event time
+            next_time = current_time + time_to_event
+            
+            # If we're still within the time horizon
+            if next_time <= 360:
+                # Determine next state (deterministic transition to next state in this simple case)
+                next_state = current_state + 1
                 
-                # Get possible next states
-                next_states = state_transitions[current_state]
+                # Record transition
+                patient_trajectory.append((next_time, current_state, next_state))
                 
-                # Fixed LOW probability of transition at each time point
-                # This means patients will spend more time in each state
-                if np.random.random() < low_prob and next_states:  # Only transition with low_prob probability
-                    # If we transition, use a fixed next state (the first one in the list)
-                    next_state = next_states[0]
-                    
-                    # Create record for this transition
-                    record = {
-                        "time": time_values[t_idx],
-                        "from_state": current_state,
-                        "to_state": next_state,
-                        **{f"covariate_{j}": X[i, j] for j in range(n_covariates)},
-                    }
-                    records.append(record)
-                    
-                    # Update current state
-                    current_state = next_state
-                else:
-                    # Stay in the same state (self-transition) - only for non-absorbing states
-                    record = {
-                        "time": time_values[t_idx],
-                        "from_state": current_state,
-                        "to_state": current_state,  # Self-transition
-                        **{f"covariate_{j}": X[i, j] for j in range(n_covariates)},
-                    }
-                    records.append(record)
+                # Update state
+                current_state = next_state
+                current_time = next_time
+            else:
+                # We've reached the time horizon without another event
+                break
         
-        # Make sure we have all needed states represented in the data
-        # This is necessary to ensure the model can be trained
-        df = pd.DataFrame(records)
-        if not df.empty:
-            all_states_present = set(df["from_state"].unique()) | set(df["to_state"].unique())
-            for s in range(n_states):
-                if s not in all_states_present:
-                    # Add a dummy record for each missing state
-                    dummy_record = {
-                        "time": time_values[0],
-                        "from_state": max(s-1, 0),
-                        "to_state": s,
-                        **{f"covariate_{j}": 0.0 for j in range(n_covariates)},
-                    }
-                    records.append(dummy_record)
+        continuous_trajectories.append(patient_trajectory)
+    
+    # Discretize continuous trajectories to fine and coarse grids
+    fine_records = []
+    coarse_records = []
+    
+    for i, trajectory in enumerate(continuous_trajectories):
+        # Extract patient covariates
+        patient_covariates = {f"covariate_{j}": X[i, j] for j in range(n_covariates)}
         
-        return pd.DataFrame(records)
+        # Discretize to fine grid
+        fine_discretized = discretize_trajectory(trajectory, fine_time_values, patient_covariates)
+        fine_records.extend(fine_discretized)
+        
+        # Discretize to coarse grid
+        coarse_discretized = discretize_trajectory(trajectory, coarse_time_values, patient_covariates)
+        coarse_records.extend(coarse_discretized)
     
-    # Generate data with fine time discretization using our custom function
-    fine_data = generate_fixed_prob_data(fine_time_values, n_samples, low_prob=0.15)
+    # Create DataFrames
+    fine_data = pd.DataFrame(fine_records)
+    coarse_data = pd.DataFrame(coarse_records)
     
-    # Coarse time discretization (quarterly intervals)
-    coarse_time_values = np.array([0, 90, 180, 270, 360])  # 5 quarterly points
+    # Ensure all states are represented (for training stability)
+    fine_data = ensure_all_states_present(fine_data, n_states, fine_time_values[0], n_covariates)
+    coarse_data = ensure_all_states_present(coarse_data, n_states, coarse_time_values[0], n_covariates)
     
-    # Use consistent random seed again
-    np.random.seed(42)
-    torch.manual_seed(42)
-    
-    # Generate data with coarse time discretization
-    coarse_data = generate_fixed_prob_data(coarse_time_values, n_samples, low_prob=0.25)
-    
-    # Store the max observed time for use in simulations
-    max_observed_time = 360  # This is the maximum time value in our data
+    # Set maximum observed time
+    max_observed_time = 360
     
     return fine_data, coarse_data, max_observed_time, state_transitions, global_params
+
+def discretize_trajectory(trajectory, time_grid, covariates):
+    """Discretize a continuous-time trajectory to a specific time grid."""
+    records = []
+    
+    # Extract continuous event times and states
+    event_times = [event[0] for event in trajectory]
+    states = [event[2] for event in trajectory]
+    
+    # For each time point in the grid (except the last one)
+    for t_idx in range(len(time_grid) - 1):
+        current_time = time_grid[t_idx]
+        next_grid_time = time_grid[t_idx + 1]
+        
+        # Find the state at this time point
+        state_idx = np.searchsorted(event_times, current_time, side='right') - 1
+        state_idx = max(0, state_idx)  # Ensure non-negative index
+        current_state = states[state_idx]
+        
+        # Find if any state change happens before the next grid time
+        next_event_idx = np.searchsorted(event_times, next_grid_time, side='left')
+        
+        # Handle index error by checking array bounds
+        if next_event_idx > state_idx + 1 and state_idx + 1 < len(states):
+            # Multiple events before next grid time
+            # Record transition to the first new state
+            next_state = states[state_idx + 1]
+        elif next_event_idx == state_idx + 1 and state_idx + 1 < len(states) and event_times[state_idx + 1] < next_grid_time:
+            # One event before next grid time
+            next_state = states[state_idx + 1]
+        else:
+            # No events before next grid time - self-transition
+            next_state = current_state
+        
+        # Create record
+        record = {
+            "time": current_time,
+            "from_state": current_state,
+            "to_state": next_state,
+            **covariates
+        }
+        records.append(record)
+    
+    return records
+
+def ensure_all_states_present(df, n_states, initial_time, n_covariates):
+    """Ensure all states are present in the dataset for training stability."""
+    if not df.empty:
+        all_states_present = set(df["from_state"].unique()) | set(df["to_state"].unique())
+        
+        for s in range(n_states):
+            if s not in all_states_present:
+                # Add a dummy record for each missing state
+                dummy_record = {
+                    "time": initial_time,
+                    "from_state": max(s-1, 0),
+                    "to_state": s,
+                    **{f"covariate_{j}": 0.0 for j in range(n_covariates)},
+                }
+                df = pd.concat([df, pd.DataFrame([dummy_record])], ignore_index=True)
+    
+    return df
 
 # 2. Fit models with each discretization
 def fit_models(fine_data, coarse_data, state_transitions, n_covariates):
@@ -195,7 +247,7 @@ def simulate_trajectories(fine_model, coarse_model, max_observed_time, n_covaria
     test_features = torch.zeros((1, n_covariates))
     
     # Simulate within the observed time range (important!)
-    n_simulations = 1000  # Minimal simulations for demonstration
+    n_simulations = 10000  # More simulations for better statistical comparison
     
     # Use same random seed for both simulations to reduce variability
     torch.manual_seed(1234)
@@ -209,6 +261,7 @@ def simulate_trajectories(fine_model, coarse_model, max_observed_time, n_covaria
         max_time=max_observed_time,  # Explicitly use observed time range
         n_simulations_per_patient=n_simulations,
         seed=1234,
+        time_adjusted=True,  # Enable time adjustment
         use_original_time=True
     )
     
@@ -224,6 +277,7 @@ def simulate_trajectories(fine_model, coarse_model, max_observed_time, n_covaria
         max_time=max_observed_time,  # Explicitly use observed time range
         n_simulations_per_patient=n_simulations,
         seed=1234,
+        time_adjusted=True,  # Enable time adjustment
         use_original_time=True
     )
     
@@ -403,6 +457,8 @@ def main():
     print("3. Limiting simulation to the observed time range")
     print("4. Using non-absorbing states to prevent convergence to 1.0")
     print("5. Using consistent random seeds for reproducibility")
+    print("6. Enabling time adjustment for simulations")
+    print("7. Simulating from the same underlying continuous-time process")
 
 if __name__ == "__main__":
     main()

@@ -46,8 +46,10 @@ def calculate_cif(
     competing_risk_states : Optional[List[int]], optional
         List of states considered competing risks to the target state
     method : str, optional
-        Method to use for CIF calculation. Options: "aalen-johansen" (default, recommended),
-        "naive" (simpler method, less accurate with heavy censoring)
+        Method to use for CIF calculation. Options: 
+        - "aalen-johansen" (default): Traditional estimator for right-censored data
+        - "empirical" (recommended for simulated data): Simple, robust method that works well with simulated trajectories
+        - "naive": Legacy method (identical to empirical, maintained for backward compatibility)
         
     Returns
     -------
@@ -95,7 +97,7 @@ def calculate_cif(
     
     # Choose the appropriate method
     if method.lower() == "aalen-johansen":
-        # Use Aalen-Johansen estimator (recommended for censored data)
+        # Use Aalen-Johansen estimator (traditional approach for right-censored data)
         # First, prepare event data from trajectories
         event_data = _prepare_event_data(trajectories, max_time, censoring_col)
         
@@ -129,8 +131,8 @@ def calculate_cif(
                 time_grid, 
                 ci_level=ci_level
             )
-    else:
-        # Use simpler method (less accurate with heavy censoring)
+    elif method.lower() == "empirical" or method.lower() == "naive":
+        # Use empirical method (simple, robust method recommended for simulated data)
         # Handle censoring if specified
         has_censoring = censoring_col is not None and censoring_col in trajectories.columns
         
@@ -153,7 +155,8 @@ def calculate_cif(
                     time_grid, 
                     ci_level,
                     censoring_col=censoring_col if has_censoring else None,
-                    competing_risk_states=competing_risk_states if has_competing_risks else None
+                    competing_risk_states=competing_risk_states if has_competing_risks else None,
+                    method=method.lower()
                 )
                 patient_cif['patient_id'] = patient_id
                 patient_cifs.append(patient_cif)
@@ -167,8 +170,11 @@ def calculate_cif(
                 time_grid, 
                 ci_level,
                 censoring_col=censoring_col if has_censoring else None,
-                competing_risk_states=competing_risk_states if has_competing_risks else None
+                competing_risk_states=competing_risk_states if has_competing_risks else None,
+                method=method.lower()
             )
+    else:
+        raise ValueError(f"Unknown method: {method}. Valid options are: 'aalen-johansen', 'empirical', or 'naive'.")
 
 
 def _prepare_event_data(
@@ -533,7 +539,7 @@ def _calculate_single_cif(
     ci_level: float = 0.95,
     censoring_col: Optional[str] = None,
     competing_risk_states: Optional[List[int]] = None,
-    method: str = "naive"
+    method: str = "empirical"
 ) -> pd.DataFrame:
     """Helper function to calculate CIF for a single group of trajectories.
     
@@ -552,7 +558,9 @@ def _calculate_single_cif(
     competing_risk_states : Optional[List[int]], optional
         List of states considered competing risks to the target state
     method : str, optional
-        Calculation method. "naive" is simpler but less accurate with heavy censoring.
+        Calculation method. Options:
+        - "empirical" (default): Simple, robust method recommended for simulated data
+        - "naive": Legacy method (identical to empirical, maintained for backward compatibility)
         
     Returns
     -------
@@ -723,16 +731,20 @@ def _calculate_single_cif(
     
     # Calculate variance - use effective sample size calculation
     var_terms = np.zeros_like(cifs)
-    n_effective = n_sims
     
-    # For non-zero, non-one CIF values, calculate variance
-    nonzero_mask = (cifs > 0) & (cifs < 1)
+    # Create n_effective as a vector - one value for each time point
     if has_censoring:
         # Adjust effective sample size for censoring
         n_effective = n_sims * np.mean(~censoring_status, axis=0)
         n_effective = np.maximum(n_effective, 1.0)  # Prevent division by zero
+    else:
+        # Without censoring, effective n is the same at all time points
+        n_effective = np.ones_like(cifs) * n_sims
     
-    var_terms[nonzero_mask] = cifs[nonzero_mask] * (1 - cifs[nonzero_mask]) / n_effective[nonzero_mask]
+    # For non-zero, non-one CIF values, calculate variance
+    nonzero_mask = (cifs > 0) & (cifs < 1)
+    if np.any(nonzero_mask):
+        var_terms[nonzero_mask] = cifs[nonzero_mask] * (1 - cifs[nonzero_mask]) / n_effective[nonzero_mask]
     
     # Calculate confidence intervals
     lower_ci = np.maximum(0, cifs - z_alpha[0] * np.sqrt(var_terms))
