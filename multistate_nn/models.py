@@ -123,6 +123,8 @@ class BaseMultiStateNN:
             raise ValueError("from_state must be specified for predict_proba")
         if logits.size(1) == 0:  # Absorbing state
             return torch.ones((x.size(0), 1), device=x.device)
+        
+        # Convert logits to probabilities using softmax
         return F.softmax(logits, dim=1)
 
 

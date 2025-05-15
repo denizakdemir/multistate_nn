@@ -168,6 +168,7 @@ def plot_cif(
     show_ci: bool = True,
     linestyle: str = '-',
     alpha: float = 0.2,
+    use_original_time: bool = True,  # Kept for backward compatibility
 ) -> plt.Axes:
     """Plot cumulative incidence function.
     
@@ -187,6 +188,8 @@ def plot_cif(
         Line style
     alpha : float, optional
         Transparency for confidence interval
+    use_original_time : bool, optional
+        Whether to use original time values on x-axis (deprecated, kept for backward compatibility)
         
     Returns
     -------
@@ -195,6 +198,9 @@ def plot_cif(
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(10, 6))
+    
+    # Sort by time to ensure correct plotting
+    cif_df = cif_df.sort_values(by='time')
     
     # Plot the CIF
     ax.plot(cif_df['time'], cif_df['cif'], color=color, linestyle=linestyle, label=label)
@@ -214,6 +220,9 @@ def plot_cif(
     ax.set_ylabel('Cumulative Incidence')
     ax.grid(True, alpha=0.3)
     
+    # Add y-axis limits to ensure consistent visualization
+    ax.set_ylim(0, 1)
+    
     if label is not None:
         ax.legend()
     
@@ -227,6 +236,9 @@ def compare_cifs(
     title: str = 'Comparison of Cumulative Incidence Functions',
     figsize: Tuple[float, float] = (12, 8),
     show_ci: bool = True,
+    use_original_time: bool = True,  # Kept for backward compatibility
+    common_time_grid: bool = False,
+    n_grid_points: int = 100
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Compare multiple CIFs on the same plot.
     
@@ -244,18 +256,78 @@ def compare_cifs(
         Figure size
     show_ci : bool, optional
         If True, show confidence intervals
+    use_original_time : bool, optional
+        Whether to use original time values on x-axis (deprecated, kept for backward compatibility)
+    common_time_grid : bool, optional
+        If True, resamples all CIFs onto a common time grid for better comparison
+    n_grid_points : int, optional
+        Number of points to use when resampling to a common time grid
         
     Returns
     -------
     Tuple[plt.Figure, plt.Axes]
         The figure and axes with the plot
     """
+    import numpy as np
+    from scipy.interpolate import interp1d
+    
     fig, ax = plt.subplots(figsize=figsize)
     
     if colors is None:
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         colors = colors[:len(cif_list)]
     
+    # Resample CIFs to a common time grid if requested
+    if common_time_grid and len(cif_list) > 1:
+        # Find the min and max time across all CIFs
+        min_time = min(df['time'].min() for df in cif_list)
+        max_time = max(df['time'].max() for df in cif_list)
+        
+        # Create a common time grid
+        common_grid = np.linspace(min_time, max_time, n_grid_points)
+        
+        # Resample each CIF onto the common grid using linear interpolation
+        resampled_cifs = []
+        for cif_df in cif_list:
+            # Sort by time to ensure correct interpolation
+            cif_df = cif_df.sort_values(by='time')
+            
+            # Create interpolation functions
+            f_cif = interp1d(cif_df['time'], cif_df['cif'], 
+                              bounds_error=False, fill_value=(0, cif_df['cif'].iloc[-1]))
+            
+            # Interpolate CIF values
+            new_cifs = f_cif(common_grid)
+            
+            # Interpolate confidence intervals if available
+            if 'lower_ci' in cif_df.columns and 'upper_ci' in cif_df.columns:
+                f_lower = interp1d(cif_df['time'], cif_df['lower_ci'],
+                                    bounds_error=False, fill_value=(0, cif_df['lower_ci'].iloc[-1]))
+                f_upper = interp1d(cif_df['time'], cif_df['upper_ci'],
+                                    bounds_error=False, fill_value=(0, cif_df['upper_ci'].iloc[-1]))
+                new_lower = f_lower(common_grid)
+                new_upper = f_upper(common_grid)
+                
+                # Create new dataframe with interpolated values
+                new_df = pd.DataFrame({
+                    'time': common_grid,
+                    'cif': new_cifs,
+                    'lower_ci': new_lower,
+                    'upper_ci': new_upper
+                })
+            else:
+                # Create new dataframe without confidence intervals
+                new_df = pd.DataFrame({
+                    'time': common_grid,
+                    'cif': new_cifs
+                })
+                
+            resampled_cifs.append(new_df)
+        
+        # Replace the original CIFs with resampled ones
+        cif_list = resampled_cifs
+    
+    # Plot each CIF
     for i, (cif_df, label) in enumerate(zip(cif_list, labels)):
         color = colors[i % len(colors)]
         plot_cif(

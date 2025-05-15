@@ -116,8 +116,28 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         time_idx: torch.Tensor,
         from_state: torch.Tensor,
         to_state: Optional[torch.Tensor] = None,
+        is_censored: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Pyro model for variational inference."""
+        """Pyro model for variational inference with censoring support.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features
+        time_idx : torch.Tensor
+            Time indices
+        from_state : torch.Tensor
+            Source states
+        to_state : Optional[torch.Tensor], optional
+            Target states (if None, no observations)
+        is_censored : Optional[torch.Tensor], optional
+            Boolean tensor indicating censored observations (True=censored)
+            
+        Returns
+        -------
+        torch.Tensor
+            Logits tensor
+        """
         if not PYRO_AVAILABLE:
             raise ImportError("Pyro must be installed")
 
@@ -136,6 +156,11 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             
             # Add this sample
             valid_indices.append(i)
+            
+            # Check if this sample is censored
+            is_censored_i = False
+            if is_censored is not None and i < len(is_censored):
+                is_censored_i = bool(is_censored[i].item())
             
             # Compute logits for this sample
             curr_logits = self.forward(
@@ -180,16 +205,69 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
 
         # Only sample valid transitions
         if valid_mask.any() and to_state is not None:
-            valid_logits = logits[valid_mask]
-            valid_obs = obs[valid_mask]
+            # Different handling for censored and uncensored observations
+            if is_censored is not None:
+                # Get censoring status for valid samples
+                valid_censored = torch.zeros(valid_mask.sum(), dtype=torch.bool, device=x.device)
+                censored_counter = 0
+                for i, valid in enumerate(valid_mask):
+                    if valid and i < len(is_censored):
+                        valid_censored[censored_counter] = is_censored[i]
+                        censored_counter += 1
+                
+                # Split into censored and uncensored observations
+                uncensored_mask = ~valid_censored
+                censored_mask = valid_censored
+                
+                valid_logits = logits[valid_mask]
+                valid_obs = obs[valid_mask]
+                
+                # Process uncensored observations with standard categorical distribution
+                if uncensored_mask.any():
+                    uncensored_logits = valid_logits[uncensored_mask]
+                    uncensored_obs = valid_obs[uncensored_mask]
+                    
+                    with pyro.poutine.block(hide=["uncensored_obs"]):
+                        with pyro.plate("uncensored_obs", len(uncensored_logits)):
+                            pyro.sample(
+                                "uncensored_obs",
+                                dist.Categorical(probs=F.softmax(uncensored_logits, dim=1)),
+                                obs=uncensored_obs
+                            )
+                
+                # Process censored observations with modified likelihood
+                # For right-censoring in survival analysis, we know the event hasn't happened yet
+                if censored_mask.any():
+                    censored_logits = valid_logits[censored_mask]
+                    censored_probs = F.softmax(censored_logits, dim=1)
+                    
+                    # In Bayesian context, we can model censoring as a constraint
+                    # that the true event time is greater than the censoring time
+                    # This means different likelihoods for different state transition models
+                    
+                    # Since priors and detailed censoring mechanism depend on specific application,
+                    # we use a simplified approach here: for each censored observation,
+                    # we use a uniform prior over all possible next states
+                    
+                    with pyro.poutine.block(hide=["censored_prior"]):
+                        with pyro.plate("censored_prior", len(censored_logits)):
+                            # Sample from uniform prior (no observation)
+                            pyro.sample(
+                                "censored_prior",
+                                dist.Categorical(probs=torch.ones_like(censored_probs) / censored_probs.size(1))
+                            )
+            else:
+                # Standard handling for all observations when no censoring information
+                valid_logits = logits[valid_mask]
+                valid_obs = obs[valid_mask]
 
-            with pyro.poutine.block(hide=["obs"]):
-                with pyro.plate("obs", len(valid_logits)):
-                    pyro.sample(
-                        "obs",
-                        dist.Categorical(probs=F.softmax(valid_logits, dim=1)),
-                        obs=valid_obs
-                    )
+                with pyro.poutine.block(hide=["obs"]):
+                    with pyro.plate("obs", len(valid_logits)):
+                        pyro.sample(
+                            "obs",
+                            dist.Categorical(probs=F.softmax(valid_logits, dim=1)),
+                            obs=valid_obs
+                        )
 
         return logits
 
@@ -199,8 +277,9 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         time_idx: torch.Tensor,
         from_state: torch.Tensor,
         to_state: Optional[torch.Tensor] = None,
+        is_censored: Optional[torch.Tensor] = None,
     ) -> None:
-        """Pyro guide for variational inference."""
+        """Pyro guide for variational inference with censoring support."""
         if not PYRO_AVAILABLE:
             raise ImportError("Pyro must be installed")
         # Guide is empty since we're using MAP estimation

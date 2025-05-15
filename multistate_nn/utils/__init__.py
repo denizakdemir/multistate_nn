@@ -12,10 +12,15 @@ from .simulation import (
     generate_synthetic_data,
     simulate_patient_trajectory,
     simulate_cohort_trajectories,
+    generate_censoring_times,
 )
 
-from .analysis import (
+from .cif import (
     calculate_cif,
+)
+
+from .time_mapping import (
+    TimeMapper,
 )
 
 __all__ = [
@@ -30,7 +35,11 @@ __all__ = [
     "generate_synthetic_data",
     "simulate_patient_trajectory",
     "simulate_cohort_trajectories",
+    "generate_censoring_times",
     
     # Analysis
     "calculate_cif",
+    
+    # Time mapping
+    "TimeMapper",
 ]
