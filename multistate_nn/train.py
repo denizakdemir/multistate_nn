@@ -22,7 +22,15 @@ except ImportError:
     PYRO_AVAILABLE = False
     pyro = None  # type: ignore
 
-from .models import BaseMultiStateNN, MultiStateNN, BayesianMultiStateNN
+from .models import BaseMultiStateNN, MultiStateNN
+# Handle Bayesian model import conditionally
+if PYRO_AVAILABLE:
+    try:
+        from .extensions.bayesian import BayesianMultiStateNN
+    except ImportError:
+        BayesianMultiStateNN = None
+else:
+    BayesianMultiStateNN = None
 from .utils.time_mapping import TimeMapper
 
 

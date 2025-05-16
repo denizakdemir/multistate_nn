@@ -218,8 +218,4 @@ class MultiStateNN(nn.Module, BaseMultiStateNN):
 
 
 # Bayesian model is moved to extensions module
-try:
-    from .extensions.bayesian import BayesianMultiStateNN
-    __all__.append("BayesianMultiStateNN")
-except ImportError:
-    pass
+# Import is handled in __init__.py to avoid circular import issues
