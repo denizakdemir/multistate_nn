@@ -443,7 +443,6 @@ See the [examples](examples/) directory for detailed notebooks demonstrating:
 
 For detailed documentation on advanced topics, see our specialized guides:
 - [README_CENSORING.md](README_CENSORING.md): Detailed guide on handling right-censored observations
-- [README_TIME_ADJUSTMENT.md](README_TIME_ADJUSTMENT.md): Guide to time-adjusted simulations for consistent results
 
 ## Contributing
 
