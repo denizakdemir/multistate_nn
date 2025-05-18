@@ -1,8 +1,8 @@
-# MultiStateNN: Neural Network Models for Multistate Processes
+# MultiStateNN: Neural Network Models for Continuous-Time Multistate Processes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-MultiStateNN is a PyTorch-based package implementing discrete-time multistate models using neural networks. It provides robust support for censored data as the default expectation in time-to-event analysis. The package supports both deterministic and Bayesian inference, making it suitable for modeling state transitions in various applications such as:
+MultiStateNN is a PyTorch-based package implementing continuous-time multistate models using Neural Ordinary Differential Equations (Neural ODEs). It provides robust support for censored data as the default expectation in time-to-event analysis. The package supports both deterministic and Bayesian inference, making it suitable for modeling state transitions in various applications such as:
 
 - Disease progression modeling with real-world censored patient data
 - Survival analysis with competing risks
@@ -12,24 +12,26 @@ MultiStateNN is a PyTorch-based package implementing discrete-time multistate mo
 
 ## Features
 
-- Flexible neural network architectures with shared base classes
+- Neural ODE-based implementation for continuous-time dynamics
+- Specialized neural architectures for intensity functions (MLP, RNN, Attention)
 - Support for arbitrary state transition structures
-- Simplified temporal effects modeling 
 - Optional Bayesian inference using Pyro (via extensions)
-- Hierarchical shrinkage for grouped transitions
+- Proper handling of intensity matrix constraints
 - Built-in visualization tools
-- Patient trajectory simulation
+- Patient trajectory simulation in continuous time
 - Support for original time scales (days, years, etc.)
-- Consistent CIF calculations across different time discretizations
 
 ### Advanced Censoring Support
 
 - Comprehensive handling of right-censored observations as the default
 - Modified loss function that properly accounts for censored transitions
 - Specialized simulation functions that incorporate censoring
-- Aalen-Johansen estimator for unbiased CIF calculation with censoring
 - Competing risks analysis with proper censoring adjustments
-- Inverse probability of censoring weighting (IPCW) for more accurate estimates
+- Continuous-time intensity matrix formulation for accurate estimates
+
+## Version Note
+
+**IMPORTANT**: Version 0.4.0+ of MultiStateNN has migrated to a fully continuous-time implementation using Neural ODEs. It is **NOT** backward compatible with earlier versions that used discrete-time models. If you need the discrete-time implementation, please use version 0.3.x or earlier.
 
 ## Installation
 
@@ -83,14 +85,15 @@ import pandas as pd
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from multistate_nn import MultiStateNN, fit
+from multistate_nn import ContinuousMultiStateNN, fit
 from multistate_nn.train import ModelConfig, TrainConfig
 
 # Prepare your data with censoring information
 data = pd.DataFrame({
-    'time': [0, 0, 1, 1, 1, 2, 2],
+    'time_start': [0.0, 0.0, 1.2, 1.5, 1.7, 2.0, 2.3],
+    'time_end': [1.2, 1.0, 1.8, 2.2, 2.5, 3.0, 3.2],
     'from_state': [0, 0, 1, 1, 2, 1, 2],
-    'to_state': [1, 2, 2, 3, 2, 1, 2],  # Note: self-transitions can indicate censoring
+    'to_state': [1, 2, 2, 3, 2, 1, 2],
     'age': [65, 70, 55, 75, 60, 62, 68],
     'biomarker': [1.2, 0.8, 1.5, 0.9, 1.1, 1.0, 1.3],
     'censored': [0, 0, 0, 0, 1, 1, 1]  # Censoring indicator (1=censored, 0=observed)
@@ -110,6 +113,7 @@ model_config = ModelConfig(
     hidden_dims=[64, 32],     # Hidden layer dimensions
     num_states=4,             # Total number of states (0-3)
     state_transitions=state_transitions,
+    model_type="continuous",  # Specify continuous-time model
 )
 
 # Define training configuration
@@ -117,7 +121,8 @@ train_config = TrainConfig(
     batch_size=32,
     epochs=100,
     learning_rate=0.005,
-    use_original_time=True    # Use actual time values rather than indices
+    solver="dopri5",          # ODE solver to use
+    solver_options={"rtol": 1e-3, "atol": 1e-4}  # Solver tolerance options
 )
 
 # Fit the model with explicit censoring information
@@ -126,43 +131,50 @@ model = fit(
     covariates=['age', 'biomarker'],
     model_config=model_config,
     train_config=train_config,
-    censoring_col='censored'  # Specify column containing censoring information
+    time_start_col='time_start',  # Specify column containing start times
+    time_end_col='time_end',      # Specify column containing end times
+    censoring_col='censored'      # Specify column containing censoring information
 )
 
 # Make predictions
 x_new = torch.tensor([[70, 1.2], [65, 0.8]], dtype=torch.float32)
-probs = model.predict_proba(x_new, time_idx=1, from_state=0)
+probs = model.predict_proba(x_new, time_start=1.0, time_end=2.5, from_state=0)
 print("Transition probabilities:", probs)
 
 # Simulate trajectories with censoring
-from multistate_nn.utils import simulate_patient_trajectory
+from multistate_nn.utils import simulate_continuous_patient_trajectory
 
-trajectories = simulate_patient_trajectory(
+trajectories = simulate_continuous_patient_trajectory(
     model=model,
     x=x_new[0:1],          # Features for a single patient
     start_state=0,
-    max_time=5,
+    max_time=5.0,
     n_simulations=100,
+    time_step=0.1,         # Time step for simulation grid
     censoring_rate=0.3     # 30% of simulated trajectories will be censored
 )
 
-# Calculate CIF with proper handling of censoring
-from multistate_nn.utils.analysis import calculate_cif
+# Calculate and plot transition probabilities over time
+from_state = 0
+to_state = 3
+time_points = np.linspace(0, 5, 50)
+probabilities = []
 
-cif = calculate_cif(
-    trajectories=pd.concat(trajectories),
-    target_state=3,        # Terminal state
-    censoring_col='censored',
-    competing_risk_states=[1, 2]  # States considered competing risks
-)
+for t in time_points:
+    prob = model.predict_proba(
+        x_new[0:1], 
+        time_start=0.0, 
+        time_end=t, 
+        from_state=from_state
+    ).detach().numpy()[0, to_state]
+    probabilities.append(prob)
 
-# Plot the CIF
+# Plot the probability curve
 plt.figure(figsize=(8, 5))
-plt.plot(cif['time'], cif['cif'], 'b-', label='CIF for State 3')
-plt.fill_between(cif['time'], cif['lower_ci'], cif['upper_ci'], color='b', alpha=0.2)
+plt.plot(time_points, probabilities, 'b-', label=f'P({from_state} → {to_state})')
 plt.xlabel('Time')
-plt.ylabel('Cumulative Incidence')
-plt.title('CIF with Censoring')
+plt.ylabel('Transition Probability')
+plt.title('Continuous-Time Transition Probability')
 plt.legend()
 plt.grid(alpha=0.3)
 ```
@@ -175,11 +187,18 @@ MultiStateNN has a modular architecture composed of:
 ### Core Model Components
 
 - `BaseMultiStateNN`: Abstract base class providing shared functionality
-- `MultiStateNN`: Deterministic implementation (main model class)
+- `ContinuousMultiStateNN`: Continuous-time implementation using Neural ODEs
 
 ### Extensions
 
-- `BayesianMultiStateNN`: Bayesian implementation (available with Pyro)
+- `BayesianContinuousMultiStateNN`: Bayesian implementation of continuous-time model (available with Pyro)
+
+### Neural Architectures
+
+- `IntensityNetwork`: Base class for intensity function networks
+- `MLPIntensityNetwork`: Simple MLP architecture for intensity functions
+- `RecurrentIntensityNetwork`: RNN-based architecture for time-dependent intensity
+- `AttentionIntensityNetwork`: Transformer-based architecture for complex dependencies
 
 ### Training Utilities
 
@@ -191,44 +210,48 @@ MultiStateNN has a modular architecture composed of:
 
 The package includes utilities organized into logical groups:
 
-- **Visualization**: Transition heatmaps, network graphs, and CIF plots
-- **Simulation**: Generate synthetic data and trajectories
-- **Analysis**: Cumulative Incidence Functions (CIFs)
+- **Visualization**: Transition heatmaps, network graphs, and probability curves
+- **Simulation**: Generate synthetic trajectories in continuous time
+- **Analysis**: Transition probability analysis in continuous time
 
 ## Detailed Documentation
 
-### MultiStateNN Class
+### ContinuousMultiStateNN Class
 
-The core model class supporting deterministic inference with built-in censoring support:
+The core model class implementing a continuous-time multistate model using Neural ODEs:
 
 ```python
-from multistate_nn import MultiStateNN
+from multistate_nn import ContinuousMultiStateNN
 
-model = MultiStateNN(
+model = ContinuousMultiStateNN(
     input_dim=2,            # Number of covariates
     hidden_dims=[64, 32],   # Architecture of hidden layers
     num_states=4,           # Total number of states
     state_transitions={...}, # Allowed transitions
-    group_structure=None    # Optional grouping for hierarchical shrinkage
+    solver="dopri5",        # ODE solver method
+    solver_options={"rtol": 1e-3, "atol": 1e-4}  # Solver tolerance options
 )
 
 # Make predictions
 x_test = torch.tensor([[65, 1.2]])
-probs = model.predict_proba(x_test, time_idx=10, from_state=1)
+probs = model.predict_proba(x_test, time_start=0.0, time_end=2.5, from_state=1)
 ```
 
-### BayesianMultiStateNN Class
+### BayesianContinuousMultiStateNN Class
 
-Extends MultiStateNN with Bayesian inference via Pyro and includes censoring support:
+Extends ContinuousMultiStateNN with Bayesian inference via Pyro:
 
 ```python
-from multistate_nn.extensions.bayesian import BayesianMultiStateNN
+from multistate_nn.extensions.bayesian import BayesianContinuousMultiStateNN
 
-model = BayesianMultiStateNN(
+model = BayesianContinuousMultiStateNN(
     input_dim=2,
     hidden_dims=[64, 32],
     num_states=4,
-    state_transitions={...}
+    state_transitions={...},
+    prior_scale=1.0,          # Scale of prior distributions
+    solver="dopri5",          # ODE solver method
+    solver_options={"rtol": 1e-3, "atol": 1e-4}  # Solver tolerance options
 )
 
 # Training with censoring
@@ -237,110 +260,190 @@ from multistate_nn import fit
 bayesian_model = fit(
     df=data,
     covariates=['age', 'biomarker'],
-    model_config=model_config,
-    train_config=TrainConfig(bayesian=True, epochs=200),
+    time_start_col='time_start',
+    time_end_col='time_end',
+    model_config=model_config.replace(bayesian=True),
+    train_config=TrainConfig(epochs=200),
     censoring_col='censored'
 )
 
 # Inference with prediction
-probs = bayesian_model.predict_proba(x, time_idx=5, from_state=1)
+probs = bayesian_model.predict_proba(x, time_start=0.0, time_end=2.5, from_state=1)
+```
+
+### Advanced Neural Architectures
+
+The package provides specialized neural architectures for modeling intensity functions:
+
+```python
+from multistate_nn.architectures import (
+    create_intensity_network,
+    MLPIntensityNetwork,
+    RecurrentIntensityNetwork,
+    AttentionIntensityNetwork
+)
+
+# Create an MLP-based intensity network
+intensity_net = create_intensity_network(
+    arch_type="mlp",
+    input_dim=2,
+    num_states=4,
+    state_transitions=state_transitions,
+    hidden_dims=[64, 32],
+    use_layernorm=True
+)
+
+# Create an RNN-based intensity network
+rnn_intensity = create_intensity_network(
+    arch_type="recurrent",
+    input_dim=2,
+    num_states=4,
+    state_transitions=state_transitions,
+    hidden_dim=64,
+    cell_type="gru",
+    num_layers=2
+)
+
+# Create an attention-based intensity network
+attn_intensity = create_intensity_network(
+    arch_type="attention",
+    input_dim=2,
+    num_states=4,
+    state_transitions=state_transitions,
+    hidden_dim=64,
+    num_heads=4,
+    num_layers=2,
+    dropout=0.1
+)
 ```
 
 ### Analysis and Visualization Tools
 
-The package provides comprehensive tools for analyzing state transitions with proper handling of censoring:
+The package provides tools for analyzing transition probabilities in continuous time:
 
 ```python
-from multistate_nn.utils.visualization import (
-    plot_transition_heatmap, 
-    plot_transition_graph,
-    plot_cif,
-    compare_cifs
-)
+# Calculate transition probabilities over time
+time_grid = np.linspace(0, 5, 50)
+probs_over_time = []
+
+for t in time_grid:
+    prob = model.predict_proba(
+        x_new[0:1], 
+        time_start=0.0, 
+        time_end=t, 
+        from_state=0
+    ).detach().numpy()[0]
+    probs_over_time.append(prob)
 
 # Plot transition probabilities
-plot_transition_heatmap(model, x, time_idx=0, from_state=0)
+import matplotlib.pyplot as plt
 
-# Visualize transition network
-plot_transition_graph(model, x, time_idx=0)
-
-# Calculate and visualize cumulative incidence functions with censoring
-from multistate_nn.utils import calculate_cif, simulate_cohort_trajectories
-
-# Simulate trajectories with right-censoring by default
-trajectories = simulate_cohort_trajectories(
-    model, 
-    cohort_features, 
-    start_state=0, 
-    max_time=100, 
-    censoring_rate=0.3,  # 30% censoring rate
-    use_original_time=True
-)
-
-# Calculate CIF with proper handling of censoring using Aalen-Johansen estimator
-time_grid = np.linspace(0, 100, 50)  # 50 evenly spaced points
-cif = calculate_cif(
-    trajectories, 
-    target_state=3, 
-    time_grid=time_grid,
-    censoring_col='censored',  # Specify the censoring column
-    competing_risk_states=[1, 2],  # Optional: specify competing risks
-    method="aalen-johansen"  # Recommended method for censored data
-)
-
-# Plot the censoring-adjusted CIF with confidence intervals
-plot_cif(cif, label="With censoring", color="blue", show_ci=True)
-
-# Compare CIFs from different models or scenarios
-cif2 = calculate_cif(
-    trajectories2, 
-    target_state=3, 
-    time_grid=time_grid,
-    censoring_col='censored'
-)
-
-# Compare multiple CIFs on the same plot
-compare_cifs(
-    [cif, cif2],
-    labels=["Model 1 (with censoring)", "Model 2 (with censoring)"],
-    common_time_grid=True,  # Ensure consistent comparison
-    show_ci=True  # Show confidence intervals
-)
-
-# You can also use the simpler method for comparison
-cif_simple = calculate_cif(
-    trajectories, 
-    target_state=3, 
-    time_grid=time_grid,
-    censoring_col='censored',
-    method="naive"  # Simpler method, less accurate with heavy censoring
-)
-
-# Compare the two estimation methods
-compare_cifs(
-    [cif, cif_simple],
-    labels=["Aalen-Johansen estimator", "Simple method"],
-    common_time_grid=True
-)
+plt.figure(figsize=(10, 6))
+for i in range(model.num_states):
+    plt.plot(time_grid, [p[i] for p in probs_over_time], label=f'State {i}')
+plt.xlabel('Time')
+plt.ylabel('Probability')
+plt.title('Transition Probabilities from State 0')
+plt.legend()
+plt.grid(alpha=0.3)
 ```
+
+### Simulation in Continuous Time
+
+The package provides functions to simulate patient trajectories in continuous time:
+
+```python
+from multistate_nn.utils import (
+    simulate_continuous_patient_trajectory,
+    simulate_continuous_cohort_trajectories
+)
+
+# Simulate a single patient with fixed covariates
+trajectories = simulate_continuous_patient_trajectory(
+    model=model,
+    x=x_new[0:1],          # Features for a single patient
+    start_state=0,
+    max_time=5.0,
+    n_simulations=100,     # Number of trajectories to simulate
+    time_step=0.1,         # Time step for simulation grid
+    censoring_rate=0.3     # 30% of simulated trajectories will be censored
+)
+
+# Simulate a cohort of patients with different features
+cohort_features = torch.tensor([
+    [65, 1.2],  # Patient 1
+    [70, 0.8],  # Patient 2
+    [55, 1.5],  # Patient 3
+], dtype=torch.float32)
+
+cohort_trajectories = simulate_continuous_cohort_trajectories(
+    model=model,
+    cohort_features=cohort_features,
+    start_state=0,
+    max_time=5.0,
+    n_simulations_per_patient=50,  # 50 trajectories per patient
+    time_step=0.1,
+    censoring_rate=0.3
+)
+
+# Visualize trajectories
+import pandas as pd
+import seaborn as sns
+
+# Prepare data for plotting
+traj_df = pd.concat(trajectories)
+traj_df = traj_df[traj_df['grid_point'] == True]  # Use only grid points for cleaner plotting
+
+# Plot the state distribution over time
+plt.figure(figsize=(12, 6))
+sns.lineplot(
+    data=traj_df,
+    x='time',
+    y='state',
+    hue='simulation',
+    alpha=0.3,
+    palette='viridis'
+)
+plt.xlabel('Time')
+plt.ylabel('State')
+plt.title('Simulated Patient Trajectories')
+```
+
+## Mathematical Background
+
+The continuous-time multistate model is based on the theory of continuous-time Markov processes. The key elements are:
+
+1. **Intensity Matrix**: The core of the model is an intensity matrix A(t) that determines the rates of transition between states. For a system with m states, A(t) is an m×m matrix where the element a_ij(t) represents the instantaneous rate of transition from state i to state j at time t.
+
+2. **Neural ODE Formulation**: We parameterize the intensity matrix using a neural network. The evolution of state probabilities follows the ODE:
+   
+   dp(t)/dt = p(t) · A(t)
+   
+   where p(t) is a probability vector over states at time t.
+
+3. **Transition Probabilities**: The solution to this ODE gives the transition probability matrix P(s,t) from time s to time t:
+   
+   P(s,t) = exp(∫_s^t A(u) du)
+   
+   which is solved numerically using ODE solvers from the torchdiffeq package.
+
+4. **Intensity Matrix Constraints**:
+   - Off-diagonal elements must be non-negative (a_ij ≥ 0 for i≠j)
+   - Rows must sum to zero (∑_j a_ij = 0 for all i)
+   - The structure must respect the allowed state transitions
 
 ## Examples
 
 See the [examples](examples/) directory for detailed notebooks demonstrating:
-- Disease progression modeling with synthetic data
-- AIDS progression modeling with real data
-- Trajectory simulation and cumulative incidence functions
-- CIF consistency across different time discretizations
-- Original time scale handling in multistate models
-- Censoring handling and Aalen-Johansen estimation
+- Disease progression modeling with continuous-time models
+- Bayesian inference in continuous time
+- Trajectory simulation in continuous time
+- Time-dependent intensity functions
+- Censoring handling in continuous-time models
 
 For detailed documentation on advanced topics, see our specialized guides:
-
 - [README_CENSORING.md](README_CENSORING.md): Detailed guide on handling right-censored observations
-- [README_CIF_METHODOLOGY.md](README_CIF_METHODOLOGY.md): Explanation of CIF calculation methodologies and time discretization
-- [README_TIME_ADJUSTMENT.md](README_TIME_ADJUSTMENT.md): Guide to time-adjusted simulations for consistent results across different time discretizations
-
-These guides have been updated to use the consolidated API paths.
+- [README_TIME_ADJUSTMENT.md](README_TIME_ADJUSTMENT.md): Guide to time-adjusted simulations for consistent results
 
 ## Contributing
 
@@ -356,8 +459,8 @@ If you use this package in your research, please cite:
 
 ```bibtex
 @software{multistate_nn2025,
-    title={MultiStateNN: Neural Network Models for Multistate Processes},
-    author={Akdemir, Deniz},
+    title={MultiStateNN: Neural Network Models for Continuous-Time Multistate Processes},
+    author={Akdemir, Deniz, github: denizakdemir},
     year={2025},
     url={https://github.com/denizakdemir/multistate_nn}
 }

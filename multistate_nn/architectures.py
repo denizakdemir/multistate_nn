@@ -106,7 +106,7 @@ class MLPIntensityNetwork(IntensityNetwork):
                 mask[from_state, to_state] = 1.0
         
         # 2. Apply softplus for non-negative rates
-        A = torch.softplus(A) * mask
+        A = F.softplus(A) * mask
         
         # 3. Set diagonal to ensure rows sum to zero
         A_diag = -torch.sum(A, dim=2)
@@ -231,7 +231,7 @@ class RecurrentIntensityNetwork(IntensityNetwork):
             for to_state in to_states:
                 mask[from_state, to_state] = 1.0
         
-        A = torch.softplus(A) * mask
+        A = F.softplus(A) * mask
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
@@ -351,7 +351,7 @@ class AttentionIntensityNetwork(IntensityNetwork):
             for to_state in to_states:
                 mask[from_state, to_state] = 1.0
         
-        A = torch.softplus(A) * mask
+        A = F.softplus(A) * mask
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         

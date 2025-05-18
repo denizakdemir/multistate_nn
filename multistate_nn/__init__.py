@@ -1,8 +1,7 @@
-"""MultiStateNN: Neural Network Models for Multistate Processes."""
+"""MultiStateNN: Neural Network Models for Continuous-Time Multistate Processes."""
 
 # Import core models
-from .models import BaseMultiStateNN
-from .models_continuous import ContinuousMultiStateNN
+from .models import BaseMultiStateNN, ContinuousMultiStateNN
 
 # Import architectures
 from .architectures import (
@@ -29,14 +28,25 @@ from .train import (
 
 # Import utility functions from utils package
 from .utils import (
+    # Simulation utilities
     adjust_transitions_for_time,
     simulate_continuous_patient_trajectory,
     simulate_continuous_cohort_trajectories,
+    
+    # Analysis utilities
+    calculate_cif,
+    
+    # Visualization utilities
+    plot_transition_heatmap,
+    plot_transition_graph,
+    plot_intensity_matrix,
+    plot_cif,
+    compare_cifs,
 )
 
 # fit is the primary interface for training models
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"  # Updated version for continuous-time only
 
 # Define exports
 __all__ = [
@@ -65,6 +75,16 @@ __all__ = [
     "simulate_continuous_patient_trajectory",
     "simulate_continuous_cohort_trajectories",
     "adjust_transitions_for_time",
+    
+    # Analysis utilities
+    "calculate_cif",
+    
+    # Visualization utilities
+    "plot_transition_heatmap",
+    "plot_transition_graph",
+    "plot_intensity_matrix",
+    "plot_cif",
+    "compare_cifs",
 ]
 
 # Try to import Bayesian extensions - we will handle this differently 
@@ -79,13 +99,13 @@ except ImportError:
 # Add Bayesian extensions to exports if available
 if has_bayesian:
     try:
-        from .extensions.bayesian_continuous import (
+        from .extensions.bayesian import (
             BayesianContinuousMultiStateNN,
-            train_bayesian_continuous,
+            train_bayesian_model,
         )
         __all__.extend([
             "BayesianContinuousMultiStateNN",
-            "train_bayesian_continuous",
+            "train_bayesian_model",
         ])
     except ImportError:
         pass

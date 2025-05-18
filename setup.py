@@ -19,7 +19,7 @@ setup(
         "examples": ["scikit-learn>=1.0.0"],
     },
     python_requires=">=3.9",
-    author="Deniz Akdemir",
+    author="Deniz Akdemir, github: denizakdemir",
     author_email="denizakdemir@gmail.com",
     description="Discrete-time multistate models as neural network heads",
     long_description=open("README.md").read(),

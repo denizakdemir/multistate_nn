@@ -7,8 +7,64 @@ import torch
 import warnings
 import scipy.linalg
 
-from ..models_continuous import ContinuousMultiStateNN
-from .simulation import generate_censoring_times
+from ..models import ContinuousMultiStateNN
+
+
+def generate_censoring_times(
+    n_samples: int,
+    censoring_rate: float = 0.3,
+    max_time: float = 10.0,
+    covariates: Optional[np.ndarray] = None,
+    random_state: Optional[int] = None
+) -> np.ndarray:
+    """Generate random censoring times.
+    
+    Parameters
+    ----------
+    n_samples : int
+        Number of samples to generate
+    censoring_rate : float, optional
+        Target censoring rate (0-1)
+    max_time : float, optional
+        Maximum time value
+    covariates : Optional[np.ndarray], optional
+        Optional covariates to influence censoring times
+    random_state : Optional[int], optional
+        Random seed for reproducibility
+        
+    Returns
+    -------
+    np.ndarray
+        Array of censoring times
+    """
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    # Basic censoring: Exponential distribution scaled to achieve target censoring rate
+    # If censoring_rate = 0, return infinities (no censoring)
+    if censoring_rate <= 0:
+        return np.ones(n_samples) * np.inf
+    
+    # Higher rate means more censoring (shorter times)
+    # Scale to get a certain % of censoring times below max_time
+    rate = -np.log(1 - censoring_rate) / max_time
+    
+    # Generate censoring times from exponential distribution
+    censoring_times = np.random.exponential(scale=1/rate, size=n_samples)
+    
+    # If covariates are provided, adjust censoring times based on them
+    if covariates is not None:
+        # Simple adjustment: multiply by scaled norm of covariates
+        # This makes censoring dependent on covariates (informative censoring)
+        if covariates.ndim == 2 and covariates.shape[0] == n_samples:
+            # Normalize covariate norms to mean=1 to preserve the overall censoring rate
+            covariate_factors = np.linalg.norm(covariates, axis=1)
+            covariate_factors = covariate_factors / np.mean(covariate_factors) if np.mean(covariate_factors) > 0 else 1.0
+            
+            # Apply adjustment (clip to avoid extreme values)
+            censoring_times = censoring_times * np.clip(covariate_factors, 0.5, 2.0)
+    
+    return censoring_times
 
 
 def adjust_transitions_for_time(P: np.ndarray, time_diff: float) -> np.ndarray:

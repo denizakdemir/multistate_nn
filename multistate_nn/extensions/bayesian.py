@@ -1,9 +1,10 @@
-"""Bayesian extensions for MultiStateNN."""
+"""Bayesian extensions for continuous-time multistate models."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, List, Any, Union, Tuple, Hashable, cast
+from torchdiffeq import odeint
 
 try:
     import pyro
@@ -18,11 +19,13 @@ except ImportError:
     dist = None  # type: ignore
     pynn = None  # type: ignore
 
-from ..models import BaseMultiStateNN
+from ..models import BaseMultiStateNN, ContinuousMultiStateNN
+
+__all__ = ["BayesianContinuousMultiStateNN"]
 
 
-class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
-    """Bayesian extension with variational inference."""
+class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
+    """Bayesian extension of continuous-time MultiStateNN using variational inference."""
 
     def __init__(
         self,
@@ -31,9 +34,36 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         num_states: int,
         state_transitions: Dict[int, List[int]],
         group_structure: Optional[Dict[tuple[int, int], Hashable]] = None,
+        prior_scale: float = 1.0,
+        use_lowrank_multivariate: bool = False,
+        solver: str = "dopri5",
+        solver_options: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """Initialize Bayesian continuous-time multistate model.
+        
+        Parameters
+        ----------
+        input_dim : int
+            Dimension of input features
+        hidden_dims : List[int]
+            List of hidden layer dimensions
+        num_states : int
+            Number of states in the model
+        state_transitions : Dict[int, List[int]]
+            Dictionary mapping source states to possible target states
+        group_structure : Optional[Dict[tuple[int, int], Hashable]]
+            Optional grouping structure for regularization
+        prior_scale : float
+            Scale of prior distributions
+        use_lowrank_multivariate : bool
+            Whether to use low-rank multivariate priors for correlation
+        solver : str
+            ODE solver to use ('dopri5', 'rk4', etc.)
+        solver_options : Optional[Dict[str, Any]]
+            Additional options for the ODE solver
+        """
         if not PYRO_AVAILABLE:
-            raise ImportError("Pyro must be installed for BayesianMultiStateNN")
+            raise ImportError("Pyro must be installed for BayesianContinuousMultiStateNN")
         pynn.PyroModule.__init__(self)
         BaseMultiStateNN.__init__(
             self,
@@ -43,29 +73,32 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             state_transitions=state_transitions,
             group_structure=group_structure,
         )
+        
+        self.prior_scale = prior_scale
+        self.use_lowrank_multivariate = use_lowrank_multivariate
+        
+        # Get solver parameters from train_config during model creation in train.py
+        self.solver = solver
+        # Delete rtol and atol from options to avoid duplication
+        self.solver_options = solver_options.copy() if solver_options else {}
+        if 'rtol' in self.solver_options:
+            del self.solver_options['rtol']
+        if 'atol' in self.solver_options:
+            del self.solver_options['atol']
 
         # Feature extractor (shared across all states)
-        layers: List[nn.Module] = []
-        prev = input_dim
-        for width in hidden_dims:
-            layers.extend([
-                nn.Linear(prev, width),
-                nn.ReLU(inplace=True),
-                nn.LayerNorm(width)
-            ])
-            prev = width
-        self.feature_net = pynn.PyroModule[nn.Sequential](*layers)
-        self.output_dim = prev
+        self.feature_net = self._create_bayesian_feature_net(input_dim, hidden_dims)
+        self.output_dim = hidden_dims[-1]
 
-        # State‑specific heads
-        self.state_heads = pynn.PyroModule[nn.ModuleDict]()
-        for i, nexts in state_transitions.items():
-            if nexts:  # Skip absorbing states
-                self.state_heads[str(i)] = pynn.PyroModule[nn.Linear](prev, len(nexts))
-
-        # Simplified temporal smoothing
-        self.time_bias = pynn.PyroParam(torch.zeros(num_states, num_states))
-
+        # Create intensity network with Bayesian layers
+        self.intensity_net = pynn.PyroModule[nn.Linear](self.output_dim, num_states * num_states)
+        self.intensity_net.weight = pynn.PyroSample(
+            dist.Normal(0.0, self.prior_scale).expand([num_states * num_states, self.output_dim]).to_event(2)
+        )
+        self.intensity_net.bias = pynn.PyroSample(
+            dist.Normal(0.0, self.prior_scale).expand([num_states * num_states]).to_event(1)
+        )
+        
         # Optional group embeddings
         if group_structure:
             # Convert hashable values to strings for sorting
@@ -74,238 +107,297 @@ class BayesianMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             groups = [next(g for g in set(group_structure.values()) 
                      if str(g) == g_str) for g_str in groups_str]
             self._group_index = {g: i for i, g in enumerate(groups)}
-            self._group_emb = pynn.PyroModule[nn.Embedding](len(groups), prev)
-            self._log_lambda = pynn.PyroParam(torch.zeros(num_states, num_states))
+            self._group_emb = self._create_bayesian_embedding(
+                len(groups), self.output_dim, "group_embedding"
+            )
+            self._log_lambda = pynn.PyroParam(
+                torch.zeros(num_states, num_states)
+            )
 
-    @property
-    def group_emb(self) -> Optional[nn.Embedding]:
-        """Get group embeddings."""
-        return self._group_emb
+    def _create_bayesian_feature_net(self, input_dim: int, hidden_dims: List[int]) -> pynn.PyroModule:
+        """Create Bayesian feature extraction network."""
+        layers = []
+        prev = input_dim
+        
+        for i, width in enumerate(hidden_dims):
+            # Linear layer with priors on weights and biases
+            linear = pynn.PyroModule[nn.Linear](prev, width)
+            
+            # Register priors for weights and biases
+            linear.weight = pynn.PyroSample(
+                dist.Normal(0.0, self.prior_scale).expand([width, prev]).to_event(2)
+            )
+            linear.bias = pynn.PyroSample(
+                dist.Normal(0.0, self.prior_scale).expand([width]).to_event(1)
+            )
+            
+            layers.append(linear)
+            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.LayerNorm(width))
+            
+            prev = width
+            
+        return pynn.PyroModule[nn.Sequential](*layers)
+        
+    def _create_bayesian_embedding(self, num_embeddings: int, embedding_dim: int, name: str) -> pynn.PyroModule:
+        """Create Bayesian embedding layer."""
+        embedding = pynn.PyroModule[nn.Embedding](num_embeddings, embedding_dim)
+        
+        # Register prior for embeddings
+        embedding.weight = pynn.PyroSample(
+            dist.Normal(0.0, self.prior_scale).expand([num_embeddings, embedding_dim]).to_event(2)
+        )
+        
+        return embedding
 
-    @property
-    def log_lambda(self) -> Optional[nn.Parameter]:
-        """Get log lambda parameters."""
-        return self._log_lambda
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        time_idx: Optional[int] = None,
-        from_state: Optional[int] = None,
-    ) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
-        """Forward pass computing transition logits."""
+    def intensity_matrix(self, x: torch.Tensor, t: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute intensity matrix with Bayesian parameters."""
+        batch_size = x.shape[0]
         h = self.feature_net(x)
-
-        def _one(i: int) -> torch.Tensor:
-            if not self.state_transitions[i]:
-                return torch.zeros((x.size(0), 0), device=x.device)
-            logits = cast(torch.Tensor, self.state_heads[str(i)](h))
-            if time_idx is not None:
-                gamma = self._temporal_smoothing(time_idx)
-                idx = torch.tensor(self.state_transitions[i], device=x.device)
-                logits = logits + gamma[i, idx]
-            return logits
-
-        if from_state is not None:
-            return _one(from_state)
-        return {i: _one(i) for i in self.state_transitions}
-
-    def model(
-        self,
-        x: torch.Tensor,
-        time_idx: torch.Tensor,
-        from_state: torch.Tensor,
-        to_state: Optional[torch.Tensor] = None,
-        is_censored: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Pyro model for variational inference with censoring support.
+        outputs = self.intensity_net(h)
+        
+        # Reshape and apply constraints
+        A = outputs.view(batch_size, self.num_states, self.num_states)
+        
+        # Create mask for allowed transitions
+        mask = torch.zeros(self.num_states, self.num_states, device=x.device)
+        for from_state, to_states in self.state_transitions.items():
+            for to_state in to_states:
+                mask[from_state, to_state] = 1.0
+        
+        # Apply softplus for non-negative rates
+        A = F.softplus(A) * mask
+        
+        # Set diagonal to ensure rows sum to zero
+        A_diag = -torch.sum(A, dim=2)
+        A = A + torch.diag_embed(A_diag)
+        
+        return A
+        
+    def ode_func(self, t: torch.Tensor, p: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        """ODE function: dp/dt = p·A.
         
         Parameters
         ----------
-        x : torch.Tensor
-            Input features
-        time_idx : torch.Tensor
-            Time indices
-        from_state : torch.Tensor
-            Source states
-        to_state : Optional[torch.Tensor], optional
-            Target states (if None, no observations)
-        is_censored : Optional[torch.Tensor], optional
-            Boolean tensor indicating censored observations (True=censored)
+        t : torch.Tensor
+            Time point
+        p : torch.Tensor
+            Current probabilities (may be 1D, 2D or 3D)
+        A : torch.Tensor
+            Intensity matrix (3D: batch_size x num_states x num_states)
             
         Returns
         -------
         torch.Tensor
-            Logits tensor
+            Time derivative of probabilities
         """
+        # First check p's dimensions and print shapes for debugging
+        p_dim = p.dim()
+        
+        # Handle different input dimensions
+        if p_dim == 2:
+            # p is (batch_size x num_states)
+            # Need to ensure A is 3D (batch x state x state)
+            if A.dim() != 3:
+                raise ValueError(f"A must be 3D tensor when p is 2D, got A.dim()={A.dim()}")
+            
+            # Need to unsqueeze to use batch matrix multiplication
+            p_batch = p.unsqueeze(1)  # Shape: (batch_size, 1, num_states)
+            result = torch.bmm(p_batch, A).squeeze(1)  # Shape: (batch_size, num_states)
+            return result
+            
+        elif p_dim == 3:
+            # p is already (batch_size x something x num_states)
+            # Can directly use bmm
+            return torch.bmm(p, A)
+            
+        elif p_dim == 1:
+            # p is (num_states), need to reshape for batch matrix multiplication
+            # First ensure A is at least 3D for bmm
+            if A.dim() != 3:
+                # If A is 2D, add batch dimension
+                A_batched = A.unsqueeze(0)  # Shape: (1, state, state)
+            else:
+                A_batched = A
+                
+            # Reshape p to (1, 1, num_states) for bmm
+            p_batched = p.view(1, 1, -1)
+            
+            # Perform bmm and reshape back to 1D
+            result = torch.bmm(p_batched, A_batched).squeeze(0).squeeze(0)
+            return result
+            
+        else:
+            raise ValueError(f"Unexpected tensor dimension: p.dim()={p_dim}, expected 1, 2 or 3")
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        time_start: Union[float, torch.Tensor] = 0.0,
+        time_end: Union[float, torch.Tensor] = 1.0,
+        from_state: Optional[int] = None,
+    ) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
+        """Forward pass computing transition probabilities."""
+        batch_size = x.shape[0]
+        device = x.device
+        
+        # Convert times to tensors if they're scalars
+        if isinstance(time_start, (int, float)):
+            time_start = torch.tensor([time_start], device=device)
+        if isinstance(time_end, (int, float)):
+            time_end = torch.tensor([time_end], device=device)
+        
+        # Compute intensity matrix
+        A = self.intensity_matrix(x)
+        
+        # Debug shape info
+        print(f"DEBUG - A.shape: {A.shape}, A.dim(): {A.dim()}")
+        
+        # Set up initial condition
+        if from_state is not None:
+            p0 = torch.zeros(batch_size, self.num_states, device=device)
+            p0[:, from_state] = 1.0
+            print(f"DEBUG - p0.shape (from_state provided): {p0.shape}, p0.dim(): {p0.dim()}")
+        else:
+            p0 = torch.eye(self.num_states, device=device).repeat(batch_size, 1, 1)
+            p0 = p0.reshape(batch_size, self.num_states, self.num_states)
+            print(f"DEBUG - p0.shape (from_state not provided): {p0.shape}, p0.dim(): {p0.dim()}")
+        
+        # Solve ODE
+        times = torch.cat([time_start.view(1), time_end.view(1)], dim=0)
+        print(f"DEBUG - times.shape: {times.shape}, times: {times}")
+        
+        # Check default tolerance values
+        rtol = 1e-7  # Default rtol
+        atol = 1e-9  # Default atol
+        
+        # Define ODE function with debugging
+        def debug_ode_func(t, p):
+            print(f"DEBUG - t.shape: {t.shape}, p.shape: {p.shape}, p.dim(): {p.dim()}")
+            return self.ode_func(t, p, A)
+        
+        # Call odeint with properly structured arguments
+        try:
+            ode_result = odeint(
+                debug_ode_func,
+                p0,
+                times,
+                method=self.solver,
+                rtol=rtol,
+                atol=atol,
+                options=self.solver_options
+            )
+            print(f"DEBUG - ode_result.shape: {ode_result.shape}")
+        except Exception as e:
+            print(f"ERROR in odeint: {str(e)}")
+            raise
+        
+        # Return final state
+        p_final = ode_result[-1]
+        
+        if from_state is not None:
+            return p_final
+        else:
+            return {i: p_final[:, i, self.state_transitions[i]] 
+                  if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
+                  for i in self.state_transitions}
+
+    def model(
+        self,
+        x: torch.Tensor,
+        time_start: torch.Tensor,
+        time_end: torch.Tensor,
+        from_state: torch.Tensor,
+        to_state: Optional[torch.Tensor] = None,
+        is_censored: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Pyro model for continuous-time variational inference with censoring support."""
         if not PYRO_AVAILABLE:
             raise ImportError("Pyro must be installed")
 
         batch_size = x.size(0)
-        max_transitions = max(len(nexts) for nexts in self.state_transitions.values() if nexts)
-
-        # Process the batch together for efficiency
-        all_logits = []
-        valid_indices = []
-        for i, (x_i, time_i, state_i) in enumerate(zip(x, time_idx, from_state)):
-            state_int = int(state_i.item())
-            next_states = self.state_transitions[state_int]
+        
+        # Process each sample
+        for i in range(batch_size):
+            x_i = x[i:i+1]
+            from_state_i = from_state[i].item()
+            time_start_i = time_start[i].item()
+            time_end_i = time_end[i].item()
             
-            if not next_states:  # Skip absorbing states
+            # Skip absorbing states
+            if not self.state_transitions[from_state_i]:
                 continue
+                
+            # Compute transition probabilities
+            probs = self.forward(
+                x_i,
+                time_start=time_start_i,
+                time_end=time_end_i,
+                from_state=from_state_i
+            ).squeeze(0)
             
-            # Add this sample
-            valid_indices.append(i)
-            
-            # Check if this sample is censored
-            is_censored_i = False
-            if is_censored is not None and i < len(is_censored):
-                is_censored_i = bool(is_censored[i].item())
-            
-            # Compute logits for this sample
-            curr_logits = self.forward(
-                x_i.unsqueeze(0),
-                time_i.item(),
-                state_int
-            )
-            if isinstance(curr_logits, dict):
-                raise ValueError("from_state must be specified")
-            
-            # Store logits
-            all_logits.append(curr_logits.squeeze(0))
+            # For uncensored observations
+            if to_state is not None and i < len(to_state) and not (is_censored is not None and is_censored[i].item()):
+                to_state_i = to_state[i].item()
+                
+                # Use categorical distribution for the observation
+                pyro.sample(
+                    f"obs_{i}",
+                    dist.Categorical(probs=probs),
+                    obs=torch.tensor(to_state_i, device=x.device)
+                )
+            # For censored observations
+            elif is_censored is not None and i < len(is_censored) and is_censored[i].item():
+                # For censored data, condition on survival (staying in current state)
+                pyro.factor(
+                    f"censored_{i}",
+                    torch.log(torch.clamp(probs[from_state_i], min=1e-8))
+                )
         
-        # Create a tensor for all valid logits
-        if not valid_indices:
-            # No valid transitions in this batch
-            return torch.zeros((0, 0), device=x.device)
-        
-        # Initialize tensors for all items
-        logits = torch.zeros(batch_size, max_transitions, device=x.device)
-        valid_mask = torch.zeros(batch_size, dtype=torch.bool, device=x.device)
-        obs = torch.zeros(batch_size, dtype=torch.long, device=x.device)
-        
-        # Fill in valid entries
-        for idx, i in enumerate(valid_indices):
-            state_int = int(from_state[i].item())
-            next_states = self.state_transitions[state_int]
-            curr_logits = all_logits[idx]
-            
-            # Store logits and mark as valid
-            logits[i, :curr_logits.size(0)] = curr_logits
-            valid_mask[i] = True
-            
-            # Set observation index if available
-            if to_state is not None:
-                to_state_i = int(to_state[i].item())
-                try:
-                    obs[i] = next_states.index(to_state_i)
-                    valid_mask[i] = True
-                except ValueError:
-                    valid_mask[i] = False
-
-        # Only sample valid transitions
-        if valid_mask.any() and to_state is not None:
-            # Different handling for censored and uncensored observations
-            if is_censored is not None:
-                # Get censoring status for valid samples
-                valid_censored = torch.zeros(valid_mask.sum(), dtype=torch.bool, device=x.device)
-                censored_counter = 0
-                for i, valid in enumerate(valid_mask):
-                    if valid and i < len(is_censored):
-                        valid_censored[censored_counter] = is_censored[i]
-                        censored_counter += 1
-                
-                # Split into censored and uncensored observations
-                uncensored_mask = ~valid_censored
-                censored_mask = valid_censored
-                
-                valid_logits = logits[valid_mask]
-                valid_obs = obs[valid_mask]
-                
-                # Process uncensored observations with standard categorical distribution
-                if uncensored_mask.any():
-                    uncensored_logits = valid_logits[uncensored_mask]
-                    uncensored_obs = valid_obs[uncensored_mask]
-                    
-                    with pyro.poutine.block(hide=["uncensored_obs"]):
-                        with pyro.plate("uncensored_obs", len(uncensored_logits)):
-                            pyro.sample(
-                                "uncensored_obs",
-                                dist.Categorical(probs=F.softmax(uncensored_logits, dim=1)),
-                                obs=uncensored_obs
-                            )
-                
-                # Process censored observations with modified likelihood
-                # For right-censoring in survival analysis, we know the event hasn't happened yet
-                if censored_mask.any():
-                    censored_logits = valid_logits[censored_mask]
-                    censored_probs = F.softmax(censored_logits, dim=1)
-                    
-                    # In Bayesian context, we can model censoring as a constraint
-                    # that the true event time is greater than the censoring time
-                    # This means different likelihoods for different state transition models
-                    
-                    # Since priors and detailed censoring mechanism depend on specific application,
-                    # we use a simplified approach here: for each censored observation,
-                    # we use a uniform prior over all possible next states
-                    
-                    with pyro.poutine.block(hide=["censored_prior"]):
-                        with pyro.plate("censored_prior", len(censored_logits)):
-                            # Sample from uniform prior (no observation)
-                            pyro.sample(
-                                "censored_prior",
-                                dist.Categorical(probs=torch.ones_like(censored_probs) / censored_probs.size(1))
-                            )
-            else:
-                # Standard handling for all observations when no censoring information
-                valid_logits = logits[valid_mask]
-                valid_obs = obs[valid_mask]
-
-                with pyro.poutine.block(hide=["obs"]):
-                    with pyro.plate("obs", len(valid_logits)):
-                        pyro.sample(
-                            "obs",
-                            dist.Categorical(probs=F.softmax(valid_logits, dim=1)),
-                            obs=valid_obs
-                        )
-
-        return logits
+        return probs
 
     def guide(
         self,
         x: torch.Tensor,
-        time_idx: torch.Tensor,
+        time_start: torch.Tensor,
+        time_end: torch.Tensor,
         from_state: torch.Tensor,
         to_state: Optional[torch.Tensor] = None,
         is_censored: Optional[torch.Tensor] = None,
     ) -> None:
-        """Pyro guide for variational inference with censoring support."""
+        """Pyro guide for variational inference."""
         if not PYRO_AVAILABLE:
             raise ImportError("Pyro must be installed")
-        # Guide is empty since we're using MAP estimation
+            
+        # The guide is automatically created by AutoNormal
+        pass
 
 
-def train_bayesian(
-    model: BayesianMultiStateNN,
+def train_bayesian_model(
+    model: BayesianContinuousMultiStateNN,
     x: torch.Tensor,
-    time_idx: torch.Tensor,
+    time_start: torch.Tensor,
+    time_end: torch.Tensor,
     from_state: torch.Tensor,
     to_state: torch.Tensor,
     epochs: int = 100,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
     device: Optional[torch.device] = None,
+    is_censored: Optional[torch.Tensor] = None,
 ) -> List[float]:
-    """Train a Bayesian MultiStateNN model using SVI.
+    """Train a Bayesian continuous-time multistate model using SVI.
     
     Parameters
     ----------
-    model : BayesianMultiStateNN
+    model : BayesianContinuousMultiStateNN
         Model to train
     x : torch.Tensor
         Input features
-    time_idx : torch.Tensor
-        Time indices
+    time_start : torch.Tensor
+        Start times
+    time_end : torch.Tensor
+        End times
     from_state : torch.Tensor
         Source states
     to_state : torch.Tensor
@@ -318,6 +410,8 @@ def train_bayesian(
         Learning rate
     device : Optional[torch.device], optional
         Device to use for training
+    is_censored : Optional[torch.Tensor], optional
+        Binary indicator for censored observations
         
     Returns
     -------
@@ -332,28 +426,50 @@ def train_bayesian(
     
     model = model.to(device)
     x = x.to(device)
-    time_idx = time_idx.to(device)
+    time_start = time_start.to(device)
+    time_end = time_end.to(device)
     from_state = from_state.to(device) 
     to_state = to_state.to(device)
     
-    from torch.utils.data import TensorDataset, DataLoader
-    dataset = TensorDataset(x, time_idx, from_state, to_state)
-    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    if is_censored is not None:
+        is_censored = is_censored.to(device)
+        from torch.utils.data import TensorDataset, DataLoader
+        dataset = TensorDataset(x, time_start, time_end, from_state, to_state, is_censored)
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    else:
+        from torch.utils.data import TensorDataset, DataLoader
+        dataset = TensorDataset(x, time_start, time_end, from_state, to_state)
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    # Use AutoNormal guide factory with init_loc_fn=init_to_median 
+    # for stable initialization
+    guide = pyro.infer.autoguide.AutoNormal(model.model, init_loc_fn=pyro.infer.autoguide.init_to_median)
     
     optimizer = PyroAdam({"lr": learning_rate})
-    svi = SVI(model.model, model.guide, optimizer, loss=Trace_ELBO())
+    svi = SVI(model.model, guide, optimizer, loss=Trace_ELBO())
     
     from tqdm.auto import tqdm
     losses: List[float] = []
-    for _ in tqdm(range(epochs), desc="Training"):
+    
+    for _ in tqdm(range(epochs), desc="Training Bayesian model"):
         epoch_loss = 0.0
         n_batches = 0
         
-        for batch_x, batch_time, batch_from, batch_to in train_loader:
-            loss = svi.step(batch_x, batch_time, batch_from, batch_to)
-            epoch_loss += loss
-            n_batches += 1
-            
+        if is_censored is not None:
+            for batch_x, batch_time_start, batch_time_end, batch_from, batch_to, batch_censored in train_loader:
+                loss = svi.step(
+                    batch_x, batch_time_start, batch_time_end, batch_from, batch_to, batch_censored
+                )
+                epoch_loss += loss
+                n_batches += 1
+        else:
+            for batch_x, batch_time_start, batch_time_end, batch_from, batch_to in train_loader:
+                loss = svi.step(
+                    batch_x, batch_time_start, batch_time_end, batch_from, batch_to
+                )
+                epoch_loss += loss
+                n_batches += 1
+                
         losses.append(epoch_loss / n_batches)
         
     return losses

@@ -5,7 +5,7 @@ import torch
 import numpy as np
 
 # Import directly from modules to avoid circular import issues
-from multistate_nn.models_continuous import ContinuousMultiStateNN
+from multistate_nn.models import ContinuousMultiStateNN
 from multistate_nn.utils.continuous_simulation import simulate_continuous_patient_trajectory
 
 def test_continuous_model_basics():
