@@ -1,4 +1,4 @@
-"""Core model definitions."""
+"""Core continuous-time model definitions."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ from typing import Dict, List, Optional, Union, Any, Hashable, cast, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchdiffeq import odeint
 
 __all__ = [
     "BaseMultiStateNN",
-    "MultiStateNN",
+    "ContinuousMultiStateNN",
 ]
 
 
@@ -49,48 +50,31 @@ class BaseMultiStateNN:
         self._group_index: Dict[Hashable, int] = {}
         self._group_emb: Optional[nn.Embedding] = None
         self._log_lambda: Optional[nn.Parameter] = None
-
-    def _temporal_smoothing(self, t: int) -> torch.Tensor:
-        """Simple temporal smoothing function.
-        
-        Parameters
-        ----------
-        t : int
-            Time index
-            
-        Returns
-        -------
-        torch.Tensor
-            Smoothing factors for time t
-        """
-        # Return the temporal factors for time t
-        # This simpler approach uses a learnable bias for each time point
-        # with a reasonable decay factor as time increases
-        decay_factor = torch.exp(torch.tensor(-0.1 * float(t), device=self.time_bias.device))
-        gamma = self.time_bias * decay_factor
-        return gamma
-
+    
     def forward(
         self,
         x: torch.Tensor,
-        time_idx: Optional[int] = None,
+        time_start: Union[float, torch.Tensor] = 0.0,
+        time_end: Union[float, torch.Tensor] = 1.0,
         from_state: Optional[int] = None,
     ) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
-        """Forward pass computing transition logits.
+        """Forward pass computing transition probabilities.
         
         Parameters
         ----------
         x : torch.Tensor
             Input features
-        time_idx : Optional[int]
-            Time index for temporal effects
+        time_start : Union[float, torch.Tensor]
+            Start time for probability calculation
+        time_end : Union[float, torch.Tensor]
+            End time for probability calculation
         from_state : Optional[int]
-            Source state, if None returns logits for all states
+            Source state, if None returns probabilities for all states
             
         Returns
         -------
         Union[Dict[int, torch.Tensor], torch.Tensor]
-            Dictionary of logits by state or logits for specific state
+            Dictionary of probabilities by state or probabilities for specific state
         """
         # To be implemented by subclasses
         raise NotImplementedError
@@ -99,8 +83,9 @@ class BaseMultiStateNN:
     def predict_proba(
         self,
         x: torch.Tensor,
-        time_idx: int,
-        from_state: int,
+        time_start: Union[float, torch.Tensor] = 0.0,
+        time_end: Union[float, torch.Tensor] = 1.0,
+        from_state: int = 0,
     ) -> torch.Tensor:
         """Predict transition probabilities.
         
@@ -108,8 +93,10 @@ class BaseMultiStateNN:
         ----------
         x : torch.Tensor
             Input features
-        time_idx : int
-            Time index
+        time_start : Union[float, torch.Tensor]
+            Start time for probability calculation
+        time_end : Union[float, torch.Tensor]
+            End time for probability calculation
         from_state : int
             Source state
             
@@ -118,19 +105,12 @@ class BaseMultiStateNN:
         torch.Tensor
             Transition probabilities
         """
-        logits = self.forward(x, time_idx, from_state)
-        if isinstance(logits, dict):
-            raise ValueError("from_state must be specified for predict_proba")
-        if logits.size(1) == 0:  # Absorbing state
-            return torch.ones((x.size(0), 1), device=x.device)
-        
-        # Convert logits to probabilities using softmax
-        return F.softmax(logits, dim=1)
+        return self.forward(x, time_start, time_end, from_state)
 
 
-class MultiStateNN(nn.Module, BaseMultiStateNN):
-    """Discrete‑time multistate neural network."""
-
+class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
+    """Neural ODE-based continuous-time multistate model."""
+    
     def __init__(
         self,
         input_dim: int,
@@ -138,7 +118,28 @@ class MultiStateNN(nn.Module, BaseMultiStateNN):
         num_states: int,
         state_transitions: Dict[int, List[int]],
         group_structure: Optional[Dict[tuple[int, int], Hashable]] = None,
+        solver: str = "dopri5",
+        solver_options: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """Initialize continuous-time model.
+        
+        Parameters
+        ----------
+        input_dim : int
+            Dimension of input features
+        hidden_dims : List[int]
+            List of hidden layer dimensions
+        num_states : int
+            Number of states in the model
+        state_transitions : Dict[int, List[int]]
+            Dictionary mapping source states to possible target states
+        group_structure : Optional[Dict[tuple[int, int], Hashable]]
+            Optional grouping structure for regularization
+        solver : str
+            ODE solver to use ('dopri5', 'rk4', etc.)
+        solver_options : Optional[Dict[str, Any]]
+            Additional options for the ODE solver
+        """
         nn.Module.__init__(self)
         BaseMultiStateNN.__init__(
             self,
@@ -148,7 +149,7 @@ class MultiStateNN(nn.Module, BaseMultiStateNN):
             state_transitions=state_transitions,
             group_structure=group_structure,
         )
-
+        
         # Feature extractor (shared across all states)
         layers: List[nn.Module] = []
         prev = input_dim
@@ -156,22 +157,19 @@ class MultiStateNN(nn.Module, BaseMultiStateNN):
             layers.extend([
                 nn.Linear(prev, width),
                 nn.ReLU(inplace=True),
-                # Use LayerNorm instead of BatchNorm
                 nn.LayerNorm(width)
             ])
             prev = width
         self.feature_net = nn.Sequential(*layers)
         self.output_dim = prev
-
-        # State‑specific heads
-        self.state_heads = nn.ModuleDict()
-        for i, nexts in state_transitions.items():
-            if nexts:  # Skip absorbing states
-                self.state_heads[str(i)] = nn.Linear(prev, len(nexts))
-
-        # Simplified temporal smoothing
-        self.time_bias = nn.Parameter(torch.zeros(num_states, num_states))
-
+        
+        # Create intensity network that outputs transition rates
+        self.intensity_net = nn.Linear(prev, num_states * num_states)
+        
+        # ODE solver settings
+        self.solver = solver
+        self.solver_options = solver_options or {}
+        
         # Optional group embeddings
         if group_structure:
             # Convert hashable values to strings for sorting
@@ -182,44 +180,185 @@ class MultiStateNN(nn.Module, BaseMultiStateNN):
             self._group_index = {g: i for i, g in enumerate(groups)}
             self._group_emb = nn.Embedding(len(groups), prev)
             self._log_lambda = nn.Parameter(torch.zeros(num_states, num_states))
-
-    @property
-    def group_emb(self) -> Optional[nn.Embedding]:
-        """Get group embeddings."""
-        return self._group_emb
-
-    @property
-    def log_lambda(self) -> Optional[nn.Parameter]:
-        """Get log lambda parameters."""
-        return self._log_lambda
-
+            
+    def intensity_matrix(self, x: torch.Tensor, t: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute intensity matrix A(t) for given covariates x at time t.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features, shape [batch_size, input_dim]
+        t : Optional[torch.Tensor]
+            Time points, shape [batch_size, 1]
+            
+        Returns
+        -------
+        torch.Tensor
+            Intensity matrix, shape [batch_size, num_states, num_states]
+        """
+        batch_size = x.shape[0]
+        
+        # Extract features
+        h = self.feature_net(x)
+        
+        # Get raw intensity values
+        outputs = self.intensity_net(h)
+        
+        # Reshape to batch_size x num_states x num_states
+        A = outputs.view(batch_size, self.num_states, self.num_states)
+        
+        # Apply constraints: non-negative off-diagonal, zero-sum rows
+        # Create mask for allowed transitions
+        mask = torch.zeros(self.num_states, self.num_states, device=x.device)
+        for from_state, to_states in self.state_transitions.items():
+            for to_state in to_states:
+                mask[from_state, to_state] = 1.0
+        
+        # Apply softplus to ensure non-negative off-diagonal elements
+        A = F.softplus(A) * mask
+        
+        # Set diagonal to ensure rows sum to zero (Intensity matrix requirement)
+        A_diag = -torch.sum(A, dim=2)
+        A = A + torch.diag_embed(A_diag)
+        
+        return A
+    
+    def ode_func(self, t: torch.Tensor, p: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        """ODE function: dp/dt = p·A.
+        
+        Parameters
+        ----------
+        t : torch.Tensor
+            Time point
+        p : torch.Tensor
+            Current probabilities
+        A : torch.Tensor
+            Intensity matrix
+            
+        Returns
+        -------
+        torch.Tensor
+            Time derivative of probabilities
+        """
+        # Handle different cases based on dimensions
+        if p.dim() == 2:  # From specific state (batch_size x num_states)
+            # Add batch dimension for bmm
+            p_batch = p.unsqueeze(1)  # batch_size x 1 x num_states
+            result = torch.bmm(p_batch, A).squeeze(1)  # batch_size x num_states
+            return result
+        else:  # Full transition matrix (batch_size x num_states x num_states)
+            return torch.bmm(p, A)
+    
     def forward(
         self,
         x: torch.Tensor,
-        time_idx: Optional[int] = None,
+        time_start: Union[float, torch.Tensor] = 0.0,
+        time_end: Union[float, torch.Tensor] = 1.0,
         from_state: Optional[int] = None,
     ) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
-        """Forward pass computing transition logits."""
-        h = self.feature_net(x)
-
-        def _one(i: int) -> torch.Tensor:
-            if not self.state_transitions[i]:
-                return torch.zeros((x.size(0), 0), device=x.device)
-            logits = cast(torch.Tensor, self.state_heads[str(i)](h))
-            if time_idx is not None:
-                gamma = self._temporal_smoothing(time_idx)
-                idx = torch.tensor(self.state_transitions[i], device=x.device)
-                logits = logits + gamma[i, idx]
-            return logits
-
+        """Compute transition probabilities from time_start to time_end.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features
+        time_start : Union[float, torch.Tensor]
+            Start time for probability calculation
+        time_end : Union[float, torch.Tensor]
+            End time for probability calculation
+        from_state : Optional[int]
+            Source state, if None returns probabilities for all states
+            
+        Returns
+        -------
+        Union[Dict[int, torch.Tensor], torch.Tensor]
+            Dictionary of probabilities by state or probabilities for specific state
+        """
+        batch_size = x.shape[0]
+        device = x.device
+        
+        # Convert times to tensors if they're scalars
+        if isinstance(time_start, (int, float)):
+            time_start = torch.tensor([time_start], device=device)
+        if isinstance(time_end, (int, float)):
+            time_end = torch.tensor([time_end], device=device)
+        
+        # Special case: If time_start equals time_end, return identity matrix
+        if torch.allclose(time_start, time_end):
+            if from_state is not None:
+                # Return probabilities for transitions from from_state
+                probs = torch.zeros(batch_size, self.num_states, device=device)
+                probs[:, from_state] = 1.0  # Identity matrix (stay in current state)
+                return probs
+            else:
+                # Return dictionary with identity matrix for each state
+                return {i: torch.zeros(batch_size, len(self.state_transitions[i]), device=device)
+                       if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device)
+                       for i in self.state_transitions}
+            
+        # Compute intensity matrix
+        A = self.intensity_matrix(x)
+        
+        # Set up initial condition based on from_state
         if from_state is not None:
-            return _one(from_state)
-        return {i: _one(i) for i in self.state_transitions}
-
-
-# Bayesian model is moved to extensions module
-try:
-    from .extensions.bayesian import BayesianMultiStateNN
-    __all__.append("BayesianMultiStateNN")
-except ImportError:
-    pass
+            p0 = torch.zeros(batch_size, self.num_states, device=device)
+            p0[:, from_state] = 1.0
+        else:
+            # Return full transition matrix for all states
+            p0 = torch.eye(self.num_states, device=device).repeat(batch_size, 1, 1)
+            p0 = p0.reshape(batch_size, self.num_states, self.num_states)
+        
+        # Ensure times are strictly increasing
+        if time_end.item() <= time_start.item():
+            time_end = time_start + 1e-6
+        
+        # Solve ODE to get transition probabilities
+        times = torch.tensor([time_start.item(), time_end.item()], device=device)
+        
+        ode_result = odeint(
+            lambda t, p: self.ode_func(t, p, A),
+            p0,
+            times,
+            method=self.solver,
+            options=self.solver_options
+        )
+        
+        # Return final state
+        p_final = ode_result[-1]
+        
+        if from_state is not None:
+            # Get probabilities for transitions from from_state to all states
+            return p_final
+        else:
+            # Return dictionary with transitions for each state
+            return {i: p_final[:, i, self.state_transitions[i]] 
+                   if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
+                   for i in self.state_transitions}
+    
+    @torch.no_grad()
+    def predict_proba(
+        self,
+        x: torch.Tensor,
+        time_start: Union[float, torch.Tensor] = 0.0,
+        time_end: Union[float, torch.Tensor] = 1.0,
+        from_state: int = 0,
+    ) -> torch.Tensor:
+        """Predict transition probabilities for continuous-time model.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features
+        time_start : Union[float, torch.Tensor]
+            Start time for probability calculation
+        time_end : Union[float, torch.Tensor]
+            End time for probability calculation
+        from_state : int
+            Source state
+            
+        Returns
+        -------
+        torch.Tensor
+            Transition probabilities
+        """
+        return self.forward(x, time_start, time_end, from_state)

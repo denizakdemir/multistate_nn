@@ -1,4 +1,4 @@
-"""Training utilities for MultiStateNN models."""
+"""Training utilities for continuous-time MultiStateNN models."""
 
 from typing import Any, Optional, List, Dict, Union, cast, Tuple
 from dataclasses import dataclass
@@ -22,8 +22,21 @@ except ImportError:
     PYRO_AVAILABLE = False
     pyro = None  # type: ignore
 
-from .models import BaseMultiStateNN, MultiStateNN, BayesianMultiStateNN
-from .utils.time_mapping import TimeMapper
+# Import base and continuous-time models
+from .models import BaseMultiStateNN, ContinuousMultiStateNN
+from .losses import ContinuousTimeMultiStateLoss, CompetingRisksContinuousLoss, create_loss_function
+from .architectures import create_intensity_network
+
+# Handle Bayesian model imports conditionally
+if PYRO_AVAILABLE:
+    try:
+        from .extensions.bayesian import BayesianContinuousMultiStateNN, train_bayesian_model
+    except ImportError:
+        BayesianContinuousMultiStateNN = None
+        train_bayesian_model = None
+else:
+    BayesianContinuousMultiStateNN = None
+    train_bayesian_model = None
 
 
 @dataclass
@@ -42,17 +55,23 @@ class ModelConfig:
         Dictionary mapping source states to possible target states
     group_structure : Optional[Dict[tuple[int, int], Any]]
         Optional grouping structure for regularization
+    model_type : str
+        Type of model to use ('continuous', 'discrete')
+    bayesian : bool
+        Whether to use Bayesian inference
     """
     input_dim: int
     hidden_dims: List[int]
     num_states: int
     state_transitions: Dict[int, List[int]]
     group_structure: Optional[Dict[tuple[int, int], Any]] = None
+    model_type: str = "continuous"
+    bayesian: bool = False
 
     
 @dataclass
 class TrainConfig:
-    """Configuration for training MultiStateNN models.
+    """Configuration for training continuous-time MultiStateNN models.
     
     Parameters
     ----------
@@ -68,8 +87,18 @@ class TrainConfig:
         Device to use for training
     bayesian : bool
         Whether to use Bayesian inference
-    use_original_time : bool
-        Whether to preserve and use original time values
+    architecture_type : str
+        Type of architecture for continuous-time intensity network ('mlp', 'recurrent', 'attention')
+    loss_type : str
+        Type of loss function for continuous-time model ('standard', 'competing_risks')
+    competing_risk_states : List[int]
+        States that represent competing risks (used only if loss_type='competing_risks')
+    ode_solver : str
+        ODE solver for continuous-time model ('dopri5', 'rk4', etc.)
+    ode_solver_options : Optional[Dict[str, Any]]
+        Additional options for the ODE solver
+    architecture_options : Optional[Dict[str, Any]]
+        Additional options for the neural architecture
     """
     batch_size: int = 32
     epochs: int = 100
@@ -77,20 +106,37 @@ class TrainConfig:
     weight_decay: float = 1e-4
     device: Optional[torch.device] = None
     bayesian: bool = False
-    use_original_time: bool = True
+    architecture_type: str = "mlp"
+    loss_type: str = "standard"
+    competing_risk_states: List[int] = None
+    ode_solver: str = "dopri5"
+    ode_solver_options: Optional[Dict[str, Any]] = None
+    architecture_options: Optional[Dict[str, Any]] = None
+    
+    def __post_init__(self):
+        # Initialize empty lists/dicts if None provided
+        if self.competing_risk_states is None:
+            self.competing_risk_states = []
+        if self.ode_solver_options is None:
+            self.ode_solver_options = {}
+        if self.architecture_options is None:
+            self.architecture_options = {}
 
 
 def prepare_data(
     df: pd.DataFrame,
     covariates: List[str],
-    time_col: str = "time",
+    time_start_col: Optional[str] = None,
+    time_end_col: Optional[str] = None,
     censoring_col: Optional[str] = None,
     device: Optional[torch.device] = None,
     handle_missing: bool = True,
     impute_strategy: str = 'mean',
-) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], 
-           Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Prepare training data from a pandas DataFrame.
+) -> Union[
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+]:
+    """Prepare training data from a pandas DataFrame for continuous-time models.
     
     Parameters
     ----------
@@ -98,8 +144,10 @@ def prepare_data(
         Input DataFrame containing the data
     covariates : List[str]
         List of covariate column names to include
-    time_col : str, optional
-        Name of the column containing time indices
+    time_start_col : Optional[str], optional
+        Name of the column containing start times
+    time_end_col : Optional[str], optional
+        Name of the column containing end times
     censoring_col : Optional[str], optional
         Name of the column containing censoring information (1=censored, 0=observed)
     device : Optional[torch.device]
@@ -111,9 +159,11 @@ def prepare_data(
         
     Returns
     -------
-    Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], 
-          Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
-        Tensors for x, time_idx, from_state, to_state, and optionally is_censored
+    Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ]
+        Tensors for x, time_start, time_end, from_state, to_state, and optionally is_censored
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -152,50 +202,112 @@ def prepare_data(
         
         x = torch.tensor(df[covariates].values, dtype=torch.float32, device=device)
     
-    # Convert core model values to tensors
-    time_idx = torch.tensor(df[time_col].values, dtype=torch.int64, device=device)
+    # Get from_state and to_state tensors
     from_state = torch.tensor(df["from_state"].values, dtype=torch.int64, device=device)
     to_state = torch.tensor(df["to_state"].values, dtype=torch.int64, device=device)
     
-    # Handle censoring if provided
-    if censoring_col is not None:
-        if censoring_col in df.columns:
-            # Convert censoring values to boolean tensor, handling various input formats
-            censoring_vals = df[censoring_col].values
+    # For continuous-time models, we need time intervals
+    if time_start_col is None or time_end_col is None:
+        # If explicit time intervals aren't provided, try to infer them
+        if "time" in df.columns:
+            # Create time intervals from time points
+            # This assumes that each row represents a transition at the end time
+            # and the start time is the previous time for the same entity
+            entity_col = None
+            for col in ["id", "patient_id", "subject_id", "entity_id"]:
+                if col in df.columns:
+                    entity_col = col
+                    break
             
-            # Handle different input types (0/1, True/False, etc.)
-            if pd.api.types.is_bool_dtype(df[censoring_col]):
-                is_censored = torch.tensor(censoring_vals, dtype=torch.bool, device=device)
-            elif pd.api.types.is_numeric_dtype(df[censoring_col]):
-                is_censored = torch.tensor(censoring_vals > 0, dtype=torch.bool, device=device)
+            if entity_col is None:
+                # Without entity information, use general approach
+                warnings.warn("No entity identifier found. Using time points directly.")
+                # Use time directly as both start and end times
+                time_vals = df["time"].values.astype(np.float32)
+                # For start times, shift each time value back by 1 (or use 0 for the first time)
+                time_start = np.zeros_like(time_vals)
+                time_start[1:] = time_vals[:-1]
             else:
-                # Try to interpret string values or other types
-                try:
-                    is_censored = torch.tensor(
-                        [str(val).lower() in ('1', 'true', 't', 'yes', 'y') for val in censoring_vals],
-                        dtype=torch.bool, 
-                        device=device
-                    )
-                except:
-                    raise ValueError(f"Could not convert censoring column {censoring_col} to boolean values.")
+                # Use entity information to create proper intervals
+                df = df.sort_values([entity_col, "time"])
+                time_vals = df["time"].values.astype(np.float32)
+                entity_vals = df[entity_col].values
+                
+                # Initialize start times
+                time_start = np.zeros_like(time_vals)
+                
+                # Set start times based on previous time for the same entity
+                for i in range(1, len(df)):
+                    if entity_vals[i] == entity_vals[i-1]:
+                        time_start[i] = time_vals[i-1]
             
-            return x, time_idx, from_state, to_state, is_censored
+            # Convert to tensors
+            time_start_tensor = torch.tensor(time_start, dtype=torch.float32, device=device)
+            time_end_tensor = torch.tensor(time_vals, dtype=torch.float32, device=device)
         else:
-            warnings.warn(f"Censoring column '{censoring_col}' not found in the data. Proceeding without censoring.")
+            raise ValueError("For continuous-time models, either time_start_col and time_end_col "
+                          "must be provided, or 'time' column must be present in the DataFrame.")
+    else:
+        # Use the provided start and end time columns
+        time_start_tensor = torch.tensor(df[time_start_col].values, dtype=torch.float32, device=device)
+        time_end_tensor = torch.tensor(df[time_end_col].values, dtype=torch.float32, device=device)
     
-    return x, time_idx, from_state, to_state
+    # Handle censoring
+    if censoring_col is not None and censoring_col in df.columns:
+        # Convert censoring values to boolean tensor
+        censoring_vals = df[censoring_col].values
+        
+        # Handle different input types (0/1, True/False, etc.)
+        if pd.api.types.is_bool_dtype(df[censoring_col]):
+            is_censored = torch.tensor(censoring_vals, dtype=torch.bool, device=device)
+        elif pd.api.types.is_numeric_dtype(df[censoring_col]):
+            is_censored = torch.tensor(censoring_vals > 0, dtype=torch.bool, device=device)
+        else:
+            # Try to interpret string values or other types
+            try:
+                is_censored = torch.tensor(
+                    [str(val).lower() in ('1', 'true', 't', 'yes', 'y') for val in censoring_vals],
+                    dtype=torch.bool, 
+                    device=device
+                )
+            except:
+                raise ValueError(f"Could not convert censoring column {censoring_col} to boolean values.")
+        
+        return x, time_start_tensor, time_end_tensor, from_state, to_state, is_censored
+    
+    # Without censoring
+    return x, time_start_tensor, time_end_tensor, from_state, to_state
 
 
-def train_model(
-    model: BaseMultiStateNN,
-    train_loader: DataLoader,
-    train_config: TrainConfig,
-) -> List[float]:
-    """Train a MultiStateNN model.
+def get_loss_function(train_config: TrainConfig) -> nn.Module:
+    """Create the appropriate loss function for model training.
     
     Parameters
     ----------
-    model : BaseMultiStateNN
+    train_config : TrainConfig
+        Training configuration with loss parameters
+        
+    Returns
+    -------
+    nn.Module
+        Loss function module for training
+    """
+    return create_loss_function(
+        loss_type=train_config.loss_type,
+        competing_risk_states=train_config.competing_risk_states
+    )
+
+
+def train_model(
+    model: Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN],
+    train_loader: DataLoader,
+    train_config: TrainConfig,
+) -> List[float]:
+    """Train a continuous-time MultiStateNN model.
+    
+    Parameters
+    ----------
+    model : Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN]
         Model to train
     train_loader : DataLoader
         DataLoader for training data
@@ -213,28 +325,54 @@ def train_model(
         device = train_config.device
     
     model_type = type(model)
-    if model_type is MultiStateNN:
-        return _train_deterministic(
-            cast(MultiStateNN, model),
+    
+    # Handle deterministic continuous-time model
+    if model_type is ContinuousMultiStateNN:
+        # Create loss function for continuous-time model
+        loss_fn = get_loss_function(train_config)
+        
+        return _train_continuous(
+            cast(ContinuousMultiStateNN, model),
             train_loader,
+            loss_fn,
             train_config,
         )
-    elif model_type is BayesianMultiStateNN:
+    # Handle Bayesian continuous-time model
+    elif model_type is BayesianContinuousMultiStateNN:
+        # Bayesian training for continuous-time
         return _train_bayesian(
-            cast(BayesianMultiStateNN, model),
-            train_loader, 
+            cast(BayesianContinuousMultiStateNN, model),
+            train_loader,
             train_config,
         )
     else:
         raise TypeError(f"Unsupported model type: {model_type}")
 
 
-def _train_deterministic(
-    model: MultiStateNN,
+def _train_continuous(
+    model: ContinuousMultiStateNN,
     train_loader: DataLoader,
+    loss_fn: nn.Module,
     train_config: TrainConfig,
 ) -> List[float]:
-    """Train a deterministic MultiStateNN model."""
+    """Train a continuous-time MultiStateNN model.
+    
+    Parameters
+    ----------
+    model : ContinuousMultiStateNN
+        Continuous-time model to train
+    train_loader : DataLoader
+        DataLoader for training data
+    loss_fn : nn.Module
+        Loss function for continuous-time training
+    train_config : TrainConfig
+        Training configuration
+        
+    Returns
+    -------
+    List[float]
+        Training losses per epoch
+    """
     if train_config.device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -249,33 +387,46 @@ def _train_deterministic(
     )
     
     losses: List[float] = []
-    for _ in tqdm(range(train_config.epochs), desc="Training"):
+    for _ in tqdm(range(train_config.epochs), desc="Training continuous-time model"):
         epoch_loss = 0.0
         n_batches = 0
         
         # Check if the dataloader contains censoring information
         has_censoring = False
         for batch in train_loader:
-            if len(batch) > 4:  # x, time_idx, from_state, to_state, is_censored
+            if len(batch) > 5:  # x, time_start, time_end, from_state, to_state, is_censored
                 has_censoring = True
             break
         
         for batch in train_loader:
             if has_censoring:
-                x, time_idx, from_state, to_state, is_censored = batch
+                x, time_start, time_end, from_state, to_state, is_censored = batch
             else:
-                x, time_idx, from_state, to_state = batch
+                x, time_start, time_end, from_state, to_state = batch
                 is_censored = None
             
+            # Move tensors to device
             x = x.to(device)
-            time_idx = time_idx.to(device)
+            time_start = time_start.to(device)
+            time_end = time_end.to(device)
             from_state = from_state.to(device)
             to_state = to_state.to(device)
             if is_censored is not None:
                 is_censored = is_censored.to(device)
             
             optimizer.zero_grad()
-            batch_loss = _compute_batch_loss(model, x, time_idx, from_state, to_state, is_censored)
+            
+            # Compute loss using the provided loss function
+            batch_loss = loss_fn(
+                model=model,
+                x=x,
+                time_start=time_start,
+                time_end=time_end,
+                from_state=from_state,
+                to_state=to_state,
+                is_censored=is_censored
+            )
+            
             batch_loss.backward()
             optimizer.step()
             
@@ -287,177 +438,27 @@ def _train_deterministic(
     return losses
 
 
-def _compute_batch_loss(
-    model: MultiStateNN,
-    x: torch.Tensor,
-    time_idx: torch.Tensor,
-    from_state: torch.Tensor,
-    to_state: torch.Tensor,
-    is_censored: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Compute loss for a batch of data using vectorized operations.
-    
-    For censored observations, we use a different loss function. Rather than penalizing
-    specific transitions, we account for all possible future states by using a partial likelihood
-    approach for right-censored observations.
-    
-    Parameters
-    ----------
-    model : MultiStateNN
-        The model to compute loss for
-    x : torch.Tensor
-        Batch of features
-    time_idx : torch.Tensor
-        Batch of time indices
-    from_state : torch.Tensor
-        Batch of source states
-    to_state : torch.Tensor
-        Batch of target states
-    is_censored : Optional[torch.Tensor], optional
-        Batch of censoring indicators (True=censored, False=observed)
-        
-    Returns
-    -------
-    torch.Tensor
-        Loss value for the batch
-    """
-    batch_size = x.size(0)
-    device = x.device
-    
-    # Prepare data structures to collect logits and targets by state and time
-    # This improves readability and performance by avoiding nested loops
-    all_logits = []  # Will hold logits for valid transitions
-    target_indices = []  # Will hold target indices for valid transitions
-    valid_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
-    
-    # Track information needed for censoring handling
-    valid_indices = []  # Original indices for valid samples
-    valid_from_states = []  # From states for valid samples
-    valid_time_indices = []  # Time indices for valid samples
-    
-    # Process all states in the batch at once by grouping by unique from_states
-    unique_from_states = torch.unique(from_state).tolist()
-    
-    for state in unique_from_states:
-        # Skip processing if this state has no transitions
-        next_states = model.state_transitions[state]
-        if not next_states:  # Skip absorbing states
-            continue
-            
-        # Get all samples for this state
-        state_mask = from_state == state
-        if not state_mask.any():
-            continue
-            
-        # Get features and time points for this state
-        x_state = x[state_mask]
-        t_state = time_idx[state_mask]
-        
-        # Process each time index separately
-        for t in torch.unique(t_state).tolist():
-            t_mask = t_state == t
-            if not t_mask.any():
-                continue
-                
-            # Get features for samples at this time point
-            x_state_t = x_state[t_mask]
-            
-            # Get model predictions (logits)
-            logits = model(x_state_t, t, state)
-            
-            # Convert target states to indices in the state_transitions list
-            to_state_t = to_state[state_mask][t_mask]
-            targets = torch.tensor([
-                next_states.index(s.item()) if s.item() in next_states else -1 
-                for s in to_state_t
-            ], device=device)
-            
-            # Keep only valid transitions
-            valid = targets >= 0
-            if valid.any():
-                all_logits.append(logits[valid])
-                target_indices.append(targets[valid])
-                
-                # Track original indices for censoring handling
-                orig_indices = torch.where(state_mask)[0][t_mask][valid]
-                valid_mask[orig_indices] = True
-                
-                # Store information needed for censoring
-                valid_indices.append(orig_indices)
-                valid_from_states.append(torch.full_like(orig_indices, state))
-                valid_time_indices.append(torch.full_like(orig_indices, t))
-    
-    # No valid transitions in the batch
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=device)
-    
-    # Initialize loss
-    loss = torch.tensor(0.0, device=device)
-    
-    # Handle censored and uncensored observations separately
-    if is_censored is not None and valid_indices:
-        # Process each batch of samples (grouped by state and time)
-        for i, (logits, targets) in enumerate(zip(all_logits, target_indices)):
-            if i >= len(valid_indices):
-                continue
-
-            # Get censoring status for this batch
-            batch_censored = is_censored[valid_indices[i]]
-            batch_uncensored = ~batch_censored
-            
-            # --- Process uncensored observations with standard cross-entropy ---
-            if batch_uncensored.any():
-                loss = loss + nn.CrossEntropyLoss(reduction='sum')(
-                    logits[batch_uncensored], 
-                    targets[batch_uncensored]
-                )
-            
-            # --- Process censored observations with modified loss ---
-            if batch_censored.any():
-                # Get state and transition information
-                cens_state = valid_from_states[i][0].item()
-                next_possible_states = model.state_transitions[cens_state]
-                
-                # Get model predictions for censored observations
-                cens_logits = logits[batch_censored]
-                cens_probs = torch.softmax(cens_logits, dim=1)
-                
-                # Calculate censoring-aware loss
-                # For right-censored data, we want to maximize the probability
-                # of remaining in the current state (if possible)
-                if cens_state in next_possible_states:
-                    # With self-transition: maximize probability of staying in current state
-                    self_idx = next_possible_states.index(cens_state)
-                    stay_probs = cens_probs[:, self_idx]
-                    censoring_loss = -torch.log(torch.clamp(stay_probs, min=1e-8)).sum()
-                else:
-                    # Without self-transition: equal probability for all transitions
-                    # (maximum entropy approach)
-                    uniform_probs = torch.ones_like(cens_probs) / cens_probs.size(1)
-                    censoring_loss = F.kl_div(
-                        F.log_softmax(cens_logits, dim=1),
-                        uniform_probs,
-                        reduction='sum'
-                    )
-                
-                loss = loss + censoring_loss
-        
-        # Normalize the loss by the number of valid samples
-        return loss / valid_mask.sum()
-    
-    # If no censoring information, use standard cross-entropy for all samples
-    for logits, targets in zip(all_logits, target_indices):
-        loss = loss + nn.CrossEntropyLoss(reduction='sum')(logits, targets)
-    
-    return loss / valid_mask.sum()
-
-
 def _train_bayesian(
-    model: BayesianMultiStateNN,
+    model: BayesianContinuousMultiStateNN,
     train_loader: DataLoader,
     train_config: TrainConfig,
 ) -> List[float]:
-    """Train a Bayesian MultiStateNN model using SVI."""
+    """Train a Bayesian continuous-time model using SVI.
+    
+    Parameters
+    ----------
+    model : BayesianContinuousMultiStateNN
+        Bayesian continuous-time model to train
+    train_loader : DataLoader
+        DataLoader for training data
+    train_config : TrainConfig
+        Training configuration
+        
+    Returns
+    -------
+    List[float]
+        Training losses per epoch
+    """
     if not PYRO_AVAILABLE:
         raise ImportError("Pyro must be installed for Bayesian training.")
         
@@ -469,39 +470,45 @@ def _train_bayesian(
     model = model.to(device)
     
     optimizer = PyroAdam({"lr": train_config.learning_rate})
-    svi = SVI(model.model, model.guide, optimizer, loss=Trace_ELBO())
+    
+    # Use AutoNormal guide factory with init_to_median for stable initialization
+    guide = pyro.infer.autoguide.AutoNormal(model.model, init_loc_fn=pyro.infer.autoguide.init_to_median)
+    
+    svi = SVI(model.model, guide, optimizer, loss=Trace_ELBO())
     
     losses: List[float] = []
-    for _ in tqdm(range(train_config.epochs), desc="Training"):
+    for _ in tqdm(range(train_config.epochs), desc="Training Bayesian continuous-time model"):
         epoch_loss = 0.0
         n_batches = 0
         
         # Check if the dataloader contains censoring information
         has_censoring = False
         for batch in train_loader:
-            if len(batch) > 4:  # x, time_idx, from_state, to_state, is_censored
+            if len(batch) > 5:  # x, time_start, time_end, from_state, to_state, is_censored
                 has_censoring = True
             break
         
         for batch in train_loader:
             if has_censoring:
-                x, time_idx, from_state, to_state, is_censored = batch
+                x, time_start, time_end, from_state, to_state, is_censored = batch
             else:
-                x, time_idx, from_state, to_state = batch
+                x, time_start, time_end, from_state, to_state = batch
                 is_censored = None
-                
+            
+            # Move tensors to device
             x = x.to(device)
-            time_idx = time_idx.to(device)
-            from_state = from_state.to(device) 
+            time_start = time_start.to(device)
+            time_end = time_end.to(device)
+            from_state = from_state.to(device)
             to_state = to_state.to(device)
             if is_censored is not None:
                 is_censored = is_censored.to(device)
             
-            # Pass censoring information to SVI step
+            # Pass time interval and censoring information to SVI step
             if is_censored is not None:
-                loss = svi.step(x, time_idx, from_state, to_state, is_censored)
+                loss = svi.step(x, time_start, time_end, from_state, to_state, is_censored)
             else:
-                loss = svi.step(x, time_idx, from_state, to_state)
+                loss = svi.step(x, time_start, time_end, from_state, to_state)
                 
             epoch_loss += loss
             n_batches += 1
@@ -517,7 +524,9 @@ def fit(
     model_config: ModelConfig,
     train_config: Optional[TrainConfig] = None,
     censoring_col: Optional[str] = None,
-) -> Union[MultiStateNN, BayesianMultiStateNN]:
+    time_start_col: Optional[str] = None,
+    time_end_col: Optional[str] = None,
+) -> Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN]:
     """Convenience function to fit a MultiStateNN model.
     
     Parameters
@@ -527,15 +536,21 @@ def fit(
     covariates : List[str]
         List of covariate column names
     model_config : ModelConfig
-        Model configuration
+        Model configuration, which can include:
+        - model_type: Type of model ('continuous', 'discrete'). Currently, only 'continuous' is fully supported.
+        - bayesian: Whether to use Bayesian inference (requires Pyro)
     train_config : Optional[TrainConfig]
         Training configuration, defaults to standard parameters
     censoring_col : Optional[str], optional
         Name of the column containing censoring information (True=censored, False=observed)
+    time_start_col : Optional[str], optional
+        Name of the column containing start times (required for continuous-time models)
+    time_end_col : Optional[str], optional
+        Name of the column containing end times (required for continuous-time models)
         
     Returns
     -------
-    Union[MultiStateNN, BayesianMultiStateNN]
+    Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN]
         Trained model
     """
     # Use default train config if not provided
@@ -545,63 +560,83 @@ def fit(
     # Create a copy of the dataframe to avoid modifying the original
     df_copy = df.copy()
     
-    # Create time mapper if using original time
-    time_mapper = None
-    time_col = "time"
-    
-    if train_config.use_original_time:
-        # Create time mapper from original time values
-        time_mapper = TimeMapper(df["time"].values)
-        
-        # Map original time to indices
-        df_copy = time_mapper.map_df_time_to_idx(df_copy, 
-                                               time_col="time", 
-                                               idx_col="time_idx")
-        time_col = "time_idx"
-    
-    # Prepare data with or without censoring information
-    if censoring_col is not None:
-        data_tensors = prepare_data(
-            df_copy, covariates, time_col=time_col, censoring_col=censoring_col, 
-            device=train_config.device
-        )
-        if len(data_tensors) == 5:  # With censoring
-            x, time_idx, from_state, to_state, is_censored = data_tensors
-            dataset = TensorDataset(x, time_idx, from_state, to_state, is_censored)
-        else:  # Censoring column not found
-            x, time_idx, from_state, to_state = data_tensors
-            dataset = TensorDataset(x, time_idx, from_state, to_state)
-            print(f"Warning: Censoring column '{censoring_col}' not found in the data.")
+    # Determine model type based on configuration
+    # Use model_type from ModelConfig, but fallback to the bayesian parameter in TrainConfig for backward compatibility
+    if model_config.bayesian or train_config.bayesian:
+        if not PYRO_AVAILABLE:
+            raise ImportError("Pyro must be installed for Bayesian models.")
+        model_cls = BayesianContinuousMultiStateNN
     else:
-        # Without censoring
-        x, time_idx, from_state, to_state = prepare_data(
-            df_copy, covariates, time_col=time_col, device=train_config.device
-        )
-        dataset = TensorDataset(x, time_idx, from_state, to_state)
+        # For now, only continuous model type is supported, but this allows for future expansion
+        if model_config.model_type != "continuous":
+            warnings.warn(f"Model type '{model_config.model_type}' is not fully supported yet. Using continuous model.")
+        model_cls = ContinuousMultiStateNN
     
+    # Prepare data tensors for continuous-time models
+    data_tensors = prepare_data(
+        df_copy, 
+        covariates, 
+        time_start_col=time_start_col,
+        time_end_col=time_end_col,
+        censoring_col=censoring_col, 
+        device=train_config.device
+    )
+    
+    # Create dataset based on whether censoring information is available
+    if len(data_tensors) == 6:  # With censoring
+        x, time_start, time_end, from_state, to_state, is_censored = data_tensors
+        dataset = TensorDataset(x, time_start, time_end, from_state, to_state, is_censored)
+    else:  # Without censoring
+        x, time_start, time_end, from_state, to_state = data_tensors
+        dataset = TensorDataset(x, time_start, time_end, from_state, to_state)
+    
+    # Create DataLoader
     train_loader = DataLoader(
         dataset, batch_size=train_config.batch_size, shuffle=True
     )
     
-    # Initialize model
-    model_cls = BayesianMultiStateNN if train_config.bayesian else MultiStateNN
-    model = model_cls(
-        input_dim=model_config.input_dim,
-        hidden_dims=model_config.hidden_dims,
-        num_states=model_config.num_states,
-        state_transitions=model_config.state_transitions,
-        group_structure=model_config.group_structure,
-    )
+    # Initialize the model
+    if model_config.bayesian or train_config.bayesian:
+        model = model_cls(
+            input_dim=model_config.input_dim,
+            hidden_dims=model_config.hidden_dims,
+            num_states=model_config.num_states,
+            state_transitions=model_config.state_transitions,
+            group_structure=model_config.group_structure,
+            prior_scale=1.0,  # Default prior scale
+            solver=train_config.ode_solver,
+            solver_options=train_config.ode_solver_options,
+        )
+    else:
+        # For deterministic continuous-time model, optionally create an IntensityNetwork
+        # based on the architecture type if not using default
+        intensity_net = None
+        if train_config.architecture_type != "mlp" or train_config.architecture_options:
+            intensity_net = create_intensity_network(
+                arch_type=train_config.architecture_type,
+                input_dim=model_config.input_dim,
+                num_states=model_config.num_states,
+                state_transitions=model_config.state_transitions,
+                **train_config.architecture_options
+            )
+        
+        # Initialize the model with additional parameters specific to continuous-time models
+        model = model_cls(
+            input_dim=model_config.input_dim,
+            hidden_dims=model_config.hidden_dims,
+            num_states=model_config.num_states,
+            state_transitions=model_config.state_transitions,
+            group_structure=model_config.group_structure,
+            solver=train_config.ode_solver,
+            solver_options=train_config.ode_solver_options,
+        )
+        
+        # TODO: Once IntensityNetwork can be passed to ContinuousMultiStateNN,
+        # uncomment and update this section
+        # if intensity_net:
+        #     model.intensity_net = intensity_net
     
-    # Attach time mapper to the model for later use in predictions and simulations
-    if time_mapper is not None:
-        model.time_mapper = time_mapper
-    
-    # Train
+    # Train the model
     train_model(model, train_loader, train_config)
     
     return model
-
-
-
-

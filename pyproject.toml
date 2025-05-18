@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "multistate_nn"
 version = "0.1.0"
-authors = [{name = "Deniz Akdemir", email = "denizakdemir@gmail.com"}]
+authors = [{name = "Deniz Akdemir, github: denizakdemir", email = "denizakdemir@gmail.com"}]
 description = "Neural network models for multistate processes"
 readme = "README.md"
 requires-python = ">=3.9"
