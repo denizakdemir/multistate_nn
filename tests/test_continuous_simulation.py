@@ -7,7 +7,7 @@ import pandas as pd
 
 # To avoid Pyro import errors, we'll add a try block
 try:
-    from multistate_nn.models_continuous import ContinuousMultiStateNN
+    from multistate_nn.models import ContinuousMultiStateNN
     from multistate_nn.utils.continuous_simulation import (
         adjust_transitions_for_time,
         simulate_continuous_patient_trajectory,

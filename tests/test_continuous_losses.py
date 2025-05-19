@@ -7,7 +7,7 @@ import numpy as np
 # To avoid Pyro import errors, we'll add a try block
 try:
     # Import directly from modules to avoid circular import issues
-    from multistate_nn.models_continuous import ContinuousMultiStateNN
+    from multistate_nn.models import ContinuousMultiStateNN
     from multistate_nn.losses import ContinuousTimeMultiStateLoss, CompetingRisksContinuousLoss
     IMPORTS_AVAILABLE = True
 except (ImportError, AttributeError):
