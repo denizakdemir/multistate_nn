@@ -16,6 +16,17 @@ from .visualization import (
     compare_cifs,
 )
 
+from .example_utils import (
+    setup_state_names_and_colors,
+    create_patient_profile,
+    create_covariate_profiles,
+    analyze_covariate_effect,
+    compare_treatment_effects,
+    visualize_state_distribution,
+    compare_models_cif,
+    visualize_model_comparison,
+)
+
 __all__ = [
     # Continuous-time simulation utilities
     "adjust_transitions_for_time",
@@ -31,4 +42,14 @@ __all__ = [
     "plot_intensity_matrix",
     "plot_cif",
     "compare_cifs",
+    
+    # Example utilities
+    "setup_state_names_and_colors",
+    "create_patient_profile",
+    "create_covariate_profiles",
+    "analyze_covariate_effect",
+    "compare_treatment_effects",
+    "visualize_state_distribution",
+    "compare_models_cif",
+    "visualize_model_comparison",
 ]

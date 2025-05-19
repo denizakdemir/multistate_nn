@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multistate_nn"
-version = "0.1.0"
+version = "0.4.0"  # Updated version for continuous-time only
 authors = [{name = "Deniz Akdemir, github: denizakdemir", email = "denizakdemir@gmail.com"}]
-description = "Neural network models for multistate processes"
+description = "Continuous-time multistate models with neural networks and Neural ODEs"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
