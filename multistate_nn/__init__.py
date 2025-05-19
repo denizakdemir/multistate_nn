@@ -1,5 +1,10 @@
 """MultiStateNN: Neural Network Models for Continuous-Time Multistate Processes."""
 
+# First, apply patches to fix compatibility issues
+from .patches import apply_all_patches
+# This will fix issues like torchdiffeq rtol/atol duplication
+patch_results = apply_all_patches()
+
 # Import core models
 from .models import BaseMultiStateNN, ContinuousMultiStateNN
 
