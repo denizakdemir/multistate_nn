@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="multistate_nn",
-    version="0.1.0",
+    version="0.4.0",  # Updated version for continuous-time only
     packages=find_packages(),
     install_requires=[
         "torch>=2.0.0",
@@ -21,7 +21,7 @@ setup(
     python_requires=">=3.9",
     author="Deniz Akdemir, github: denizakdemir",
     author_email="denizakdemir@gmail.com",
-    description="Discrete-time multistate models as neural network heads",
+    description="Continuous-time multistate models with neural networks and Neural ODEs",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/denizakdemir/multistate_nn",
