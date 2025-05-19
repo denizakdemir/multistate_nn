@@ -470,8 +470,132 @@ See the [examples](examples/) directory for detailed notebooks demonstrating:
 - Time-dependent intensity functions
 - Censoring handling in continuous-time models
 
-For detailed documentation on advanced topics, see our specialized guides:
-- [README_CENSORING.md](README_CENSORING.md): Detailed guide on handling right-censored observations
+### Package Structure Update: Moved Example Utilities
+
+As of the latest updates, the example utility functions have been moved into the main package structure for easier access and better integration. This means you no longer need to copy or import custom utility functions from the examples directory.
+
+#### Import Changes
+
+Previously, you might have used:
+```python
+from example_utils import visualize_state_distribution, create_fixed_profile
+```
+
+Now, you should use:
+```python
+from multistate_nn.utils.example_utils import visualize_state_distribution, create_fixed_profile
+```
+
+#### Available Utilities
+
+The `multistate_nn.utils.example_utils` module contains:
+
+- `visualize_state_distribution`: Visualize state distributions over time
+- `visualize_state_distribution_over_time`: Enhanced visualization with more customization options
+- `create_fixed_profile`: Create a profile with fixed feature values for model prediction
+- `create_covariate_profiles`: Generate profiles with different covariate combinations
+- `analyze_covariate_effect`: Analyze and visualize how a covariate affects transitions
+- `plot_transition_curves`: Plot transition probabilities over time
+- And more helpful utilities for analysis and visualization
+
+#### Benefits of This Change
+
+1. **Consistent imports**: All package functionality is now available through standard imports
+2. **Better discoverability**: Tools are more visible as part of the package's public API
+3. **Improved maintenance**: Example notebooks now use the same code paths as users
+4. **Documentation support**: Functions are now part of the documented API
+
+#### How to Check Your Notebooks
+
+If you see errors like:
+```
+ModuleNotFoundError: No module named 'example_utils'
+```
+
+You should update your imports to use the new path.
+
+## Censoring in Multistate Models
+
+MultiStateNN provides robust support for right-censored observations as the default expectation in time-to-event analysis. This is essential for working with real-world data where not all transitions are observed.
+
+### What is Censoring?
+
+Censoring occurs when the exact time of a state transition is not observed, but we know it occurs after a certain time point. In medical studies, this typically happens when:
+
+- A patient drops out of the study
+- The study ends before the event of interest occurs
+- A patient is lost to follow-up
+
+In continuous-time multistate models, proper handling of censoring is essential for obtaining unbiased estimates of transition probabilities.
+
+### Types of Censoring Supported
+
+MultiStateNN provides robust support for:
+
+- **Right censoring**: When a subject's event time is only known to be greater than a certain value
+- **Independent censoring**: When the censoring mechanism is independent of the transition process
+
+### How MultiStateNN Handles Censoring
+
+#### 1. Data Representation
+
+Censored observations can be specified in your data using a dedicated censoring column:
+
+```python
+data = pd.DataFrame({
+    'time_start': [0.0, 0.0, 1.2, 1.5, 1.7],
+    'time_end': [1.2, 1.0, 1.8, 2.2, 2.5],
+    'from_state': [0, 0, 1, 1, 2],
+    'to_state': [1, 2, 2, 3, 2],  # State at time_end
+    'covariates': [...],
+    'censored': [0, 0, 0, 0, 1]   # 1 indicates censoring
+})
+```
+
+When an observation is censored:
+- `time_end` represents the last observation time
+- `to_state` represents the last observed state
+- `censored` column is set to 1
+
+#### 2. Training with Censoring Information
+
+When training a model, you can specify the censoring column:
+
+```python
+model = fit(
+    df=data,
+    covariates=['age', 'biomarker'],
+    model_config=model_config,
+    train_config=train_config,
+    time_start_col='time_start',
+    time_end_col='time_end',
+    censoring_col='censored'  # Specify column containing censoring information
+)
+```
+
+#### 3. Simulation with Censoring
+
+The simulation functions support generating censored trajectories:
+
+```python
+trajectories = simulate_continuous_patient_trajectory(
+    model=model,
+    x=x_new[0:1],
+    start_state=0,
+    max_time=5.0,
+    n_simulations=100,
+    censoring_rate=0.3  # 30% of simulated trajectories will be censored
+)
+```
+
+The censoring time is generated from an exponential distribution calibrated to achieve the target censoring rate.
+
+### Best Practices
+
+1. **Always include censoring information** when available
+2. **Ensure your censoring mechanism is independent** of the event process
+3. **Validate your model with simulated data** including censoring
+4. **Compare results with and without censoring** to understand its impact
 
 ## Contributing
 
