@@ -213,6 +213,29 @@ The package includes utilities organized into logical groups:
 - **Visualization**: Transition heatmaps, network graphs, and probability curves
 - **Simulation**: Generate synthetic trajectories in continuous time
 - **Analysis**: Transition probability analysis in continuous time
+- **Example Utilities**: Helper functions for common tasks (found in `multistate_nn.utils.example_utils`)
+
+#### Example Utilities
+
+The package provides a collection of helper functions in the `multistate_nn.utils.example_utils` module:
+
+```python
+from multistate_nn.utils.example_utils import (
+    visualize_state_distribution,
+    visualize_state_distribution_over_time,
+    create_fixed_profile,
+    create_covariate_profiles,
+    analyze_covariate_effect,
+    plot_transition_curves
+)
+```
+
+These functions make it easier to:
+- Create patient profiles for analysis
+- Generate sets of profiles with varying covariates
+- Visualize state distributions over time
+- Analyze how specific covariates affect transitions
+- Create transition probability plots
 
 ## Detailed Documentation
 
@@ -356,6 +379,12 @@ The package provides functions to simulate patient trajectories in continuous ti
 from multistate_nn.utils import (
     simulate_continuous_patient_trajectory,
     simulate_continuous_cohort_trajectories
+)
+
+# Import example utilities for visualization and analysis
+from multistate_nn.utils.example_utils import (
+    visualize_state_distribution_over_time,
+    analyze_covariate_effect
 )
 
 # Simulate a single patient with fixed covariates
