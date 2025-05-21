@@ -3,21 +3,45 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Dict, List, Any, Union, Tuple, Hashable, cast
+import contextlib
+from typing import Optional, Dict, List, Any, Union, Tuple, Hashable, cast, Type
 from torchdiffeq import odeint
 
+# Try importing Pyro components with fallbacks for type checking
 try:
     import pyro
     import pyro.distributions as dist
     import pyro.nn as pynn
     from pyro.infer import SVI, Trace_ELBO
-    from pyro.optim import Adam as PyroAdam
+    
+    # Try different ways to get PyroAdam
+    PyroAdam: Any = None
+    try:
+        # Try newer location
+        from pyro.optim.optim import Adam as PyroAdam  # type: ignore
+    except ImportError:
+        try:
+            # Try older location
+            from pyro.optim import Adam as PyroAdam  # type: ignore
+        except ImportError:
+            # Fallback to a wrapper around torch's Adam
+            import torch.optim
+            class PyroAdamWrapper:
+                def __init__(self, options: Dict[str, Any]):
+                    self.options = options
+                
+                def __call__(self, params: Dict[str, Any]) -> torch.optim.Adam:
+                    return torch.optim.Adam(params.values(), lr=self.options.get('lr', 0.001))
+            
+            PyroAdam = PyroAdamWrapper
+            
     PYRO_AVAILABLE = True
 except ImportError:
     PYRO_AVAILABLE = False
     pyro = None  # type: ignore
     dist = None  # type: ignore
     pynn = None  # type: ignore
+    PyroAdam = None  # type: ignore
 
 from ..models import BaseMultiStateNN, ContinuousMultiStateNN
 
@@ -91,7 +115,10 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         self.output_dim = hidden_dims[-1]
 
         # Create intensity network with Bayesian layers
-        self.intensity_net = pynn.PyroModule[nn.Linear](self.output_dim, num_states * num_states)
+        # Create with string name first to avoid mypy error
+        self.intensity_net = pynn.PyroModule("intensity_net")  # type: ignore
+        # Then set up as linear layer
+        self.intensity_net = cast(Any, pynn.PyroModule[nn.Linear](self.output_dim, num_states * num_states))  # type: ignore
         self.intensity_net.weight = pynn.PyroSample(
             dist.Normal(0.0, self.prior_scale).expand([num_states * num_states, self.output_dim]).to_event(2)
         )
@@ -107,12 +134,14 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             groups = [next(g for g in set(group_structure.values()) 
                      if str(g) == g_str) for g_str in groups_str]
             self._group_index = {g: i for i, g in enumerate(groups)}
-            self._group_emb = self._create_bayesian_embedding(
+            # Use cast to tell mypy this is an embedding
+            self._group_emb = cast(nn.Embedding, self._create_bayesian_embedding(
                 len(groups), self.output_dim, "group_embedding"
-            )
-            self._log_lambda = pynn.PyroParam(
+            ))
+            # Use cast to tell mypy this is a parameter
+            self._log_lambda = cast(nn.Parameter, pynn.PyroParam(
                 torch.zeros(num_states, num_states)
-            )
+            ))
 
     def _create_bayesian_feature_net(self, input_dim: int, hidden_dims: List[int]) -> pynn.PyroModule:
         """Create Bayesian feature extraction network."""
@@ -121,7 +150,11 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         
         for i, width in enumerate(hidden_dims):
             # Linear layer with priors on weights and biases
-            linear = pynn.PyroModule[nn.Linear](prev, width)
+            # Create with string name first to avoid mypy errors
+            linear_name = f"linear_{i}"
+            linear = pynn.PyroModule(linear_name)  # type: ignore
+            # Then set up as linear layer
+            linear = cast(Any, pynn.PyroModule[nn.Linear](prev, width))  # type: ignore
             
             # Register priors for weights and biases
             linear.weight = pynn.PyroSample(
@@ -132,16 +165,24 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             )
             
             layers.append(linear)
-            layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.LayerNorm(width))
+            # Cast regular PyTorch modules to Any to satisfy mypy
+            layers.append(cast(Any, nn.ReLU(inplace=True)))
+            layers.append(cast(Any, nn.LayerNorm(width)))
             
             prev = width
             
-        return pynn.PyroModule[nn.Sequential](*layers)
+        # Create with string name first
+        seq = pynn.PyroModule("feature_net_seq")  # type: ignore
+        # Then set up as sequential with explicit cast
+        seq = cast(Any, pynn.PyroModule[nn.Sequential](*layers))  # type: ignore
+        return seq
         
-    def _create_bayesian_embedding(self, num_embeddings: int, embedding_dim: int, name: str) -> pynn.PyroModule:
+    def _create_bayesian_embedding(self, num_embeddings: int, embedding_dim: int, name: str) -> Any:
         """Create Bayesian embedding layer."""
-        embedding = pynn.PyroModule[nn.Embedding](num_embeddings, embedding_dim)
+        # Create with string name first
+        embedding = pynn.PyroModule(name)  # type: ignore
+        # Then set up as embedding with explicit cast
+        embedding = cast(Any, pynn.PyroModule[nn.Embedding](num_embeddings, embedding_dim))  # type: ignore
         
         # Register prior for embeddings
         embedding.weight = pynn.PyroSample(
@@ -165,14 +206,19 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             for to_state in to_states:
                 mask[from_state, to_state] = 1.0
         
-        # Apply softplus for non-negative rates
-        A = F.softplus(A) * mask
+        # Apply softplus for non-negative rates and add small epsilon to avoid exact zeros
+        A = F.softplus(A) * mask + 1e-10
         
         # Set diagonal to ensure rows sum to zero
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
-        return A
+        # Apply additional stability checks - clamp very small negative values that might
+        # arise from floating point errors to zero
+        A = torch.where(A < -1e-8, A, torch.clamp(A, min=0.0))
+        
+        # Cast the result to tensor to satisfy mypy
+        return cast(torch.Tensor, A)
         
     def ode_func(self, t: torch.Tensor, p: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         """ODE function: dp/dt = p·A.
@@ -247,60 +293,81 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
         if isinstance(time_end, (int, float)):
             time_end = torch.tensor([time_end], device=device)
         
-        # Compute intensity matrix
-        A = self.intensity_matrix(x)
-        
-        # Debug shape info
-        print(f"DEBUG - A.shape: {A.shape}, A.dim(): {A.dim()}")
-        
-        # Set up initial condition
-        if from_state is not None:
-            p0 = torch.zeros(batch_size, self.num_states, device=device)
-            p0[:, from_state] = 1.0
-            print(f"DEBUG - p0.shape (from_state provided): {p0.shape}, p0.dim(): {p0.dim()}")
-        else:
-            p0 = torch.eye(self.num_states, device=device).repeat(batch_size, 1, 1)
-            p0 = p0.reshape(batch_size, self.num_states, self.num_states)
-            print(f"DEBUG - p0.shape (from_state not provided): {p0.shape}, p0.dim(): {p0.dim()}")
-        
-        # Solve ODE
-        times = torch.cat([time_start.view(1), time_end.view(1)], dim=0)
-        print(f"DEBUG - times.shape: {times.shape}, times: {times}")
-        
-        # Check default tolerance values
-        rtol = 1e-7  # Default rtol
-        atol = 1e-9  # Default atol
-        
-        # Define ODE function with debugging
-        def debug_ode_func(t, p):
-            print(f"DEBUG - t.shape: {t.shape}, p.shape: {p.shape}, p.dim(): {p.dim()}")
-            return self.ode_func(t, p, A)
-        
-        # Call odeint with properly structured arguments
-        try:
-            ode_result = odeint(
-                debug_ode_func,
-                p0,
-                times,
-                method=self.solver,
-                rtol=rtol,
-                atol=atol,
-                options=self.solver_options
-            )
-            print(f"DEBUG - ode_result.shape: {ode_result.shape}")
-        except Exception as e:
-            print(f"ERROR in odeint: {str(e)}")
-            raise
-        
-        # Return final state
-        p_final = ode_result[-1]
-        
-        if from_state is not None:
-            return p_final
-        else:
-            return {i: p_final[:, i, self.state_transitions[i]] 
-                  if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
-                  for i in self.state_transitions}
+        # Use Pyro's block handler to prevent sample site registration during forward pass
+        # This prevents name collisions when the forward method is called multiple times
+        with pyro.poutine.block() if PYRO_AVAILABLE else contextlib.nullcontext():
+            # Compute intensity matrix
+            A = self.intensity_matrix(x)
+            
+            # Set up initial condition
+            if from_state is not None:
+                p0 = torch.zeros(batch_size, self.num_states, device=device)
+                p0[:, from_state] = 1.0
+            else:
+                p0 = torch.eye(self.num_states, device=device).repeat(batch_size, 1, 1)
+                p0 = p0.reshape(batch_size, self.num_states, self.num_states)
+            
+            # Solve ODE
+            times = torch.cat([time_start.view(1), time_end.view(1)], dim=0)
+            
+            # Set default tolerance values
+            rtol = 1e-7  # Default rtol
+            atol = 1e-9  # Default atol
+            
+            # Define ODE function (without debug printing)
+            def clean_ode_func(t: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+                return cast(torch.Tensor, self.ode_func(t, p, A))
+            
+            # Call odeint with properly structured arguments
+            try:
+                ode_result = odeint(
+                    clean_ode_func,
+                    p0,
+                    times,
+                    method=self.solver,
+                    rtol=rtol,
+                    atol=atol,
+                    options=self.solver_options
+                )
+            except Exception as e:
+                # If we encounter errors, we'll provide a more helpful message
+                error_msg = str(e)
+                if "Multiple sample sites named" in error_msg:
+                    raise RuntimeError("Pyro sampling site name collision. Try using pyro.poutine.block() in the forward method.")
+                raise
+            
+            # Return final state
+            p_final = ode_result[-1]
+            
+            # Ensure probabilities are valid (non-negative and normalized)
+            # This can fix issues with small negative values from numerical errors
+            if from_state is not None:
+                # For single-state predictions, make probabilities valid
+                # First ensure non-negative values
+                p_final_valid = torch.clamp(p_final, min=0.0)
+                # Then normalize each row to sum to 1
+                row_sums = p_final_valid.sum(dim=1, keepdim=True)
+                # Avoid division by zero
+                row_sums = torch.where(row_sums > 0, row_sums, torch.ones_like(row_sums))
+                p_final_valid = p_final_valid / row_sums
+                
+                # Cast the result to tensor to satisfy mypy
+                return cast(torch.Tensor, p_final_valid)
+            else:
+                # For multi-state predictions (dictionary output)
+                # Apply the same corrections to each row
+                p_final_valid = torch.clamp(p_final, min=0.0)
+                # Normalize if needed
+                row_sums = p_final_valid.sum(dim=2, keepdim=True)
+                # Avoid division by zero
+                row_sums = torch.where(row_sums > 0, row_sums, torch.ones_like(row_sums))
+                p_final_valid = p_final_valid / row_sums
+                
+                # Create result dictionary with valid probabilities
+                result = {i: p_final_valid[:, i, self.state_transitions[i]] 
+                        if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
+                        for i in self.state_transitions}
+                return cast(Union[Dict[int, torch.Tensor], torch.Tensor], result)
 
     def model(
         self,
@@ -324,34 +391,58 @@ class BayesianContinuousMultiStateNN(pynn.PyroModule, BaseMultiStateNN):
             time_start_i = time_start[i].item()
             time_end_i = time_end[i].item()
             
-            # Skip absorbing states
-            if not self.state_transitions[from_state_i]:
+            # Skip absorbing states - cast to int to satisfy mypy
+            from_state_int = int(from_state_i)
+            if not self.state_transitions[from_state_int]:
                 continue
                 
-            # Compute transition probabilities
-            probs = self.forward(
-                x_i,
-                time_start=time_start_i,
-                time_end=time_end_i,
-                from_state=from_state_i
-            ).squeeze(0)
+            # Compute transition probabilities with blocking parameter registration during the forward pass
+            # This prevents sample site name collisions when called multiple times
+            with pyro.poutine.block(hide_types=["param"]) if PYRO_AVAILABLE else contextlib.nullcontext():
+                # Call forward with explicit int for from_state
+                forward_result = self.forward(
+                    x_i,
+                    time_start=time_start_i,
+                    time_end=time_end_i,
+                    from_state=int(from_state_i)
+                )
+            
+            # Handle tensor vs dict result
+            if isinstance(forward_result, torch.Tensor):
+                probs = forward_result.squeeze(0)
+            else:
+                # This shouldn't happen when from_state is provided, but handle it
+                raise TypeError("Expected tensor output but got dictionary when from_state is provided")
             
             # For uncensored observations
             if to_state is not None and i < len(to_state) and not (is_censored is not None and is_censored[i].item()):
                 to_state_i = to_state[i].item()
                 
-                # Use categorical distribution for the observation
+                # Ensure probabilities are valid (non-negative and sum to 1)
+                # First, clamp to ensure non-negative values
+                valid_probs = torch.clamp(probs, min=1e-10)
+                # Then normalize to ensure they sum to 1
+                valid_probs = valid_probs / valid_probs.sum()
+                
+                # Use categorical distribution for the observation with valid probabilities
                 pyro.sample(
                     f"obs_{i}",
-                    dist.Categorical(probs=probs),
+                    dist.Categorical(probs=valid_probs),
                     obs=torch.tensor(to_state_i, device=x.device)
                 )
             # For censored observations
             elif is_censored is not None and i < len(is_censored) and is_censored[i].item():
                 # For censored data, condition on survival (staying in current state)
+                # Cast indices to int to satisfy mypy
+                from_state_idx = int(from_state_i)
+                
+                # Handle potential invalid probabilities
+                # Ensure the probability is valid and non-zero (for log operation)
+                valid_prob = torch.clamp(probs[from_state_idx], min=1e-10)
+                
                 pyro.factor(
                     f"censored_{i}",
-                    torch.log(torch.clamp(probs[from_state_i], min=1e-8))
+                    torch.log(valid_prob)
                 )
         
         return probs
