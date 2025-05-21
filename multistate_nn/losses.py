@@ -64,7 +64,7 @@ class ContinuousTimeMultiStateLoss(nn.Module):
             censored_i = is_censored[i].item() if is_censored is not None else False
             
             # Skip absorbing states
-            if not hasattr(model, 'state_transitions') or not model.state_transitions[from_i]:
+            if not hasattr(model, 'state_transitions') or from_i not in getattr(model, 'state_transitions', {}):
                 continue
                 
             # Get transition probabilities
@@ -153,7 +153,7 @@ class CompetingRisksContinuousLoss(nn.Module):
             censored_i = is_censored[i].item() if is_censored is not None else False
             
             # Skip absorbing states
-            if not hasattr(model, 'state_transitions') or not model.state_transitions[from_i]:
+            if not hasattr(model, 'state_transitions') or from_i not in getattr(model, 'state_transitions', {}):
                 continue
                 
             # Get transition probabilities
@@ -196,8 +196,27 @@ class CompetingRisksContinuousLoss(nn.Module):
 # Factory function to create appropriate loss function
 def create_loss_function(
     loss_type: str = "standard",
-    **kwargs
+    **kwargs: Any
 ) -> nn.Module:
+    """Create an appropriate loss function based on the specified type.
+    
+    Parameters
+    ----------
+    loss_type : str
+        Type of loss function to create ('standard' or 'competing_risks')
+    **kwargs : Any
+        Additional keyword arguments to pass to the loss function constructor
+        
+    Returns
+    -------
+    nn.Module
+        Instance of the requested loss function
+    
+    Raises
+    ------
+    ValueError
+        If an invalid loss_type is provided
+    """
     """Create loss function based on type.
     
     Parameters

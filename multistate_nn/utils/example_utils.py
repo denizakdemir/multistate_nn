@@ -15,7 +15,7 @@ import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 import itertools
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import Dict, List, Tuple, Optional, Union, Any, cast
 import networkx as nx
 from matplotlib import cm
 from matplotlib.figure import Figure
@@ -141,7 +141,8 @@ def create_patient_profile(covariates: Union[Dict[str, float], Dict[str, List[fl
             feature_order = sorted(covariates.keys())
             
         # Create profile
-        profile = [covariates[feat] for feat in feature_order]
+        # Cast the result to List[float] to satisfy mypy
+        profile = cast(List[float], [covariates[feat] for feat in feature_order])
         
         # Convert to tensor
         profile_array = np.array(profile, dtype=np.float32)
@@ -187,7 +188,7 @@ def create_fixed_profile(value: float, feature_order: List[str], fixed_covariate
     return profile
 
 
-def create_covariate_profiles(**covariates):
+def create_covariate_profiles(**covariates: List[Any]) -> Dict[str, Any]:
     """Create a grid of patient profiles for different combinations of covariates.
     
     Parameters
@@ -250,7 +251,7 @@ def analyze_covariate_distribution(df: pd.DataFrame,
                                  covariate: str, 
                                  by_state: Optional[str] = None,
                                  state_names: Optional[Dict[int, str]] = None,
-                                 figsize: Tuple[int, int] = (10, 6)):
+                                 figsize: Tuple[int, int] = (10, 6)) -> Tuple[Figure, Union[Axes, np.ndarray]]:
     """Analyze the distribution of a covariate, optionally grouped by state.
     
     Parameters
@@ -339,7 +340,7 @@ def plot_transition_curves(model: Any,
                          max_time: float = 5.0,
                          num_points: int = 100,
                          state_names: Optional[Dict[int, str]] = None,
-                         figsize: Tuple[int, int] = (10, 6)):
+                         figsize: Tuple[int, int] = (10, 6)) -> Tuple[Figure, Axes]:
     """Plot transition probability curves over time from a specific state.
     
     Parameters
@@ -403,7 +404,7 @@ def visualize_state_distribution_over_time(trajectories: List[pd.DataFrame],
                                         num_points: int = 11,  # Default to 11 points (0, 0.5, 1, ..., 5)
                                         state_names: Optional[Dict[int, str]] = None,
                                         state_colors: Optional[Dict[int, str]] = None,
-                                        figsize: Tuple[int, int] = (12, 6)):
+                                        figsize: Tuple[int, int] = (12, 6)) -> Tuple[Figure, Axes]:
     """Visualize state distribution over time from simulated trajectories.
     
     Parameters
@@ -461,18 +462,28 @@ def visualize_state_distribution_over_time(trajectories: List[pd.DataFrame],
                 
                 # Count this state
                 state_key = int(state)
-                if state_key in dist:
-                    dist[state_key] += 1
+                # Use string keys instead of int keys to make mypy happy
+                state_key_str = str(state_key)
+                if state_key_str in dist:
+                    dist[state_key_str] = dist[state_key_str] + 1
                 else:
-                    dist[state_key] = 1
+                    dist[state_key_str] = 1
         
         # Convert counts to proportions
-        total = sum(dist.get(state, 0) for state in all_states)
+        # Use string keys for the dictionary
+        total = sum(dist.get(str(state), 0) for state in all_states)
         for state in all_states:
-            if state in dist:
-                dist[state] = dist[state] / total
+            state_str = str(state)
+            if state_str in dist:
+                dist[state_str] = dist[state_str] / total
             else:
-                dist[state] = 0
+                dist[state_str] = 0
+                
+        # Add numeric state keys back for the result
+        for state in all_states:
+            state_str = str(state)
+            if state_str in dist and state_str != 'time':
+                dist[state] = dist[state_str]
                 
         distributions.append(dist)
     
@@ -581,10 +592,10 @@ def visualize_state_distribution(model: Any,
 
 
 def analyze_covariate_effect(model: Any,
-                            base_profile: torch.Tensor = None,
-                            covariate_idx: int = None,
-                            covariate_values: List[float] = None,
-                            covariate_name: str = None,
+                            base_profile: Optional[torch.Tensor] = None,
+                            covariate_idx: Optional[int] = None,
+                            covariate_values: Optional[List[float]] = None,
+                            covariate_name: Optional[str] = None,
                             time_end: float = 1.0,
                             from_state: int = 0,
                             state_names: Optional[Dict[int, str]] = None,
@@ -640,6 +651,8 @@ def analyze_covariate_effect(model: Any,
         
         # Create figure for visualization
         fig, axes = plt.subplots(1, 2, figsize=figsize)
+        # Convert to ndarray to handle indexing
+        axes = cast(np.ndarray, axes)
         
         # If no state names provided, create generic ones
         if state_names is None:
@@ -682,11 +695,11 @@ def compare_treatment_effects(model: Any,
                              treatment_idx: int,
                              treatment_values: List[float],
                              treatment_labels: Optional[List[str]] = None,
-                             target_states: List[int] = None,
+                             target_states: Optional[List[int]] = None,
                              time_end: float = 5.0,
                              from_state: int = 0,
                              state_names: Optional[Dict[int, str]] = None,
-                             figsize: Tuple[int, int] = (12, 8)):
+                             figsize: Tuple[int, int] = (12, 8)) -> Tuple[Figure, Axes]:
     """Compare and visualize treatment effects on transition probabilities.
     
     Parameters
@@ -782,7 +795,7 @@ def compare_models_cif(models: Dict[str, Any],
                       time_step: float = 0.1,
                       state_names: Optional[Dict[int, str]] = None,
                       colors: Optional[Dict[str, str]] = None,
-                      figsize: Tuple[int, int] = (10, 6)):
+                      figsize: Tuple[int, int] = (10, 6)) -> Tuple[Figure, Axes]:
     """Compare cumulative incidence functions (CIFs) across different models.
     
     Parameters
@@ -853,7 +866,7 @@ def visualize_model_comparison(models: Dict[str, Any],
                               time_end: float = 1.0,
                               from_state: int = 0,
                               state_names: Optional[Dict[int, str]] = None,
-                              figsize: Tuple[int, int] = (15, 8)):
+                              figsize: Tuple[int, int] = (15, 8)) -> Tuple[Figure, np.ndarray]:
     """Compare intensity matrices and transition probabilities across different models.
     
     Parameters

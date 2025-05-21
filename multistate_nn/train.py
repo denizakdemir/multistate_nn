@@ -1,6 +1,7 @@
 """Training utilities for continuous-time MultiStateNN models."""
 
-from typing import Any, Optional, List, Dict, Union, cast, Tuple
+from typing import Any, Optional, List, Dict, Union, cast, Tuple, Type, Callable, TypeVar, Protocol
+import sys
 from dataclasses import dataclass
 import warnings
 
@@ -13,30 +14,85 @@ import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
 
+# Define a dummy type for the PyroAdam optimizer to make type checking happy
+class PyroOptimizer(Protocol):
+    def __call__(self, params: Dict[str, Any]) -> Any: ...
+
+# Define dummy class for BayesianModelProtocol if it can't be imported
+class BayesianModelProtocol(Protocol):
+    def to(self, device: torch.device) -> Any: ...
+    def model(self, *args: Any, **kwargs: Any) -> Any: ...
+
+# Try to import Pyro and related modules
 try:
     import pyro
     from pyro.infer import SVI, Trace_ELBO
-    from pyro.optim import Adam as PyroAdam
+    
+    # Try different ways to get a PyroAdam-like optimizer based on Pyro version
+    # Define a fallback first
+    import torch.optim
+    class PyroAdamWrapper:
+        """Fallback optimizer that wraps torch's Adam when Pyro's Adam isn't available."""
+        def __init__(self, options: Dict[str, Any]):
+            self.options = options
+        
+        def __call__(self, params: Dict[str, Any]) -> torch.optim.Adam:
+            return torch.optim.Adam(params.values(), lr=self.options.get('lr', 0.001))
+    
+    # Default to our fallback
+    PyroAdam: Any = PyroAdamWrapper
+    
+    # Try to get the proper PyroAdam if available
+    # We'll use type: ignore to skip the mypy errors since we handle missing imports dynamically
+    try:
+        # First try the new location (newer versions of Pyro)
+        from pyro.optim.optim import Adam as ImportedAdam  # type: ignore
+        PyroAdam = ImportedAdam
+    except (ImportError, AttributeError):
+        try:
+            # Then try the old location
+            from pyro.optim import Adam as ImportedAdam  # type: ignore
+            PyroAdam = ImportedAdam
+        except (ImportError, AttributeError):
+            # Keep using our fallback if both fail
+            pass
+    
     PYRO_AVAILABLE = True
 except ImportError:
     PYRO_AVAILABLE = False
     pyro = None  # type: ignore
+    SVI = None  # type: ignore
+    Trace_ELBO = None  # type: ignore
+    PyroAdam = None  # type: ignore
 
 # Import base and continuous-time models
 from .models import BaseMultiStateNN, ContinuousMultiStateNN
 from .losses import ContinuousTimeMultiStateLoss, CompetingRisksContinuousLoss, create_loss_function
 from .architectures import create_intensity_network
 
+# Define a TypeVar for our models to help with type checking
+T = TypeVar('T')
+
+# Create a type alias for our continuous model
+ContinuousModelType = Type[ContinuousMultiStateNN]
+
+# Define variables for Bayesian models that will be conditionally set
+_BayesianModel: Any = None
+_train_bayesian_func: Any = None
+
 # Handle Bayesian model imports conditionally
 if PYRO_AVAILABLE:
     try:
-        from .extensions.bayesian import BayesianContinuousMultiStateNN, train_bayesian_model
-    except ImportError:
-        BayesianContinuousMultiStateNN = None
-        train_bayesian_model = None
-else:
-    BayesianContinuousMultiStateNN = None
-    train_bayesian_model = None
+        # Import but don't use directly - we'll use these through the module
+        from .extensions import bayesian
+        _BayesianModel = bayesian.BayesianContinuousMultiStateNN
+        _train_bayesian_func = bayesian.train_bayesian_model
+    except (ImportError, AttributeError):
+        # If import fails but Pyro is available, we just don't have the implementation yet
+        pass
+
+# Check if we have a valid Bayesian model implementation
+HAS_BAYESIAN = PYRO_AVAILABLE and _BayesianModel is not None
 
 
 @dataclass
@@ -108,12 +164,12 @@ class TrainConfig:
     bayesian: bool = False
     architecture_type: str = "mlp"
     loss_type: str = "standard"
-    competing_risk_states: List[int] = None
+    competing_risk_states: Optional[List[int]] = None
     ode_solver: str = "dopri5"
     ode_solver_options: Optional[Dict[str, Any]] = None
     architecture_options: Optional[Dict[str, Any]] = None
     
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Initialize empty lists/dicts if None provided
         if self.competing_risk_states is None:
             self.competing_risk_states = []
@@ -261,7 +317,9 @@ def prepare_data(
         if pd.api.types.is_bool_dtype(df[censoring_col]):
             is_censored = torch.tensor(censoring_vals, dtype=torch.bool, device=device)
         elif pd.api.types.is_numeric_dtype(df[censoring_col]):
-            is_censored = torch.tensor(censoring_vals > 0, dtype=torch.bool, device=device)
+            # Convert to numpy array first to handle ExtensionArray
+            censoring_np = np.array(censoring_vals)
+            is_censored = torch.tensor(censoring_np > 0, dtype=torch.bool, device=device)
         else:
             # Try to interpret string values or other types
             try:
@@ -299,7 +357,7 @@ def get_loss_function(train_config: TrainConfig) -> nn.Module:
 
 
 def train_model(
-    model: Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN],
+    model: Any,  # Use Any to avoid type errors with Bayesian models
     train_loader: DataLoader,
     train_config: TrainConfig,
 ) -> List[float]:
@@ -338,10 +396,10 @@ def train_model(
             train_config,
         )
     # Handle Bayesian continuous-time model
-    elif model_type is BayesianContinuousMultiStateNN:
+    elif HAS_BAYESIAN and model_type is _BayesianModel:
         # Bayesian training for continuous-time
         return _train_bayesian(
-            cast(BayesianContinuousMultiStateNN, model),
+            model,  # No need for cast, we'll use it as Any
             train_loader,
             train_config,
         )
@@ -439,7 +497,7 @@ def _train_continuous(
 
 
 def _train_bayesian(
-    model: BayesianContinuousMultiStateNN,
+    model: Any,  # Use Any for Bayesian model to avoid circular type issues
     train_loader: DataLoader,
     train_config: TrainConfig,
 ) -> List[float]:
@@ -469,10 +527,22 @@ def _train_bayesian(
     
     model = model.to(device)
     
+    if not PYRO_AVAILABLE:
+        raise ImportError("Pyro must be installed for Bayesian training.")
+    
+    if PyroAdam is None:
+        raise ImportError("PyroAdam optimizer is not available. Please check your Pyro installation.")
+    
     optimizer = PyroAdam({"lr": train_config.learning_rate})
+    
+    # Make sure pyro is available
+    assert pyro is not None, "Pyro is not available even though PYRO_AVAILABLE is True"
     
     # Use AutoNormal guide factory with init_to_median for stable initialization
     guide = pyro.infer.autoguide.AutoNormal(model.model, init_loc_fn=pyro.infer.autoguide.init_to_median)
+    
+    # Make sure SVI and Trace_ELBO are available
+    assert SVI is not None and Trace_ELBO is not None, "SVI or Trace_ELBO not available"
     
     svi = SVI(model.model, guide, optimizer, loss=Trace_ELBO())
     
@@ -526,7 +596,7 @@ def fit(
     censoring_col: Optional[str] = None,
     time_start_col: Optional[str] = None,
     time_end_col: Optional[str] = None,
-) -> Union[ContinuousMultiStateNN, BayesianContinuousMultiStateNN]:
+) -> Any:  # Use Any to avoid circular type references
     """Convenience function to fit a MultiStateNN model.
     
     Parameters
@@ -565,11 +635,17 @@ def fit(
     if model_config.bayesian or train_config.bayesian:
         if not PYRO_AVAILABLE:
             raise ImportError("Pyro must be installed for Bayesian models.")
-        model_cls = BayesianContinuousMultiStateNN
+        if not HAS_BAYESIAN:
+            raise ImportError("BayesianContinuousMultiStateNN is not available")
+        
+        # Use the Bayesian model class we loaded earlier
+        model_cls = _BayesianModel
     else:
         # For now, only continuous model type is supported, but this allows for future expansion
         if model_config.model_type != "continuous":
             warnings.warn(f"Model type '{model_config.model_type}' is not fully supported yet. Using continuous model.")
+        
+        # Set the model class to ContinuousMultiStateNN
         model_cls = ContinuousMultiStateNN
     
     # Prepare data tensors for continuous-time models
@@ -597,16 +673,25 @@ def fit(
     
     # Initialize the model
     if model_config.bayesian or train_config.bayesian:
-        model = model_cls(
-            input_dim=model_config.input_dim,
-            hidden_dims=model_config.hidden_dims,
-            num_states=model_config.num_states,
-            state_transitions=model_config.state_transitions,
-            group_structure=model_config.group_structure,
-            prior_scale=1.0,  # Default prior scale
-            solver=train_config.ode_solver,
-            solver_options=train_config.ode_solver_options,
-        )
+        # Handle keyword arguments for Bayesian model
+        kwargs: Dict[str, Any] = {
+            "input_dim": model_config.input_dim,
+            "hidden_dims": model_config.hidden_dims,
+            "num_states": model_config.num_states,
+            "state_transitions": model_config.state_transitions,
+            "solver": train_config.ode_solver,
+            "solver_options": train_config.ode_solver_options,
+        }
+        
+        # Only add group_structure if not None
+        if model_config.group_structure is not None:
+            kwargs["group_structure"] = model_config.group_structure
+            
+        # Add prior_scale for Bayesian models
+        kwargs["prior_scale"] = 1.0  # Default prior scale
+        
+        # Initialize using our flexible approach
+        model = model_cls(**kwargs)  # type: ignore
     else:
         # For deterministic continuous-time model, optionally create an IntensityNetwork
         # based on the architecture type if not using default
@@ -617,11 +702,11 @@ def fit(
                 input_dim=model_config.input_dim,
                 num_states=model_config.num_states,
                 state_transitions=model_config.state_transitions,
-                **train_config.architecture_options
+                **(train_config.architecture_options or {})
             )
         
         # Initialize the model with additional parameters specific to continuous-time models
-        model = model_cls(
+        model = ContinuousMultiStateNN(
             input_dim=model_config.input_dim,
             hidden_dims=model_config.hidden_dims,
             num_states=model_config.num_states,

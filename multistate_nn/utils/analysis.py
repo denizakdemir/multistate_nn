@@ -1,6 +1,6 @@
 """Analysis utilities for MultiStateNN models."""
 
-from typing import Optional, Tuple, Union, Sequence, List, Dict
+from typing import Optional, Tuple, Union, Sequence, List, Dict, cast, Set
 import numpy as np
 import pandas as pd
 import warnings
@@ -82,7 +82,7 @@ def calculate_cif(
                 time_points = sorted(time_points + [max_time])
         else:
             # Create an evenly spaced grid with n_grid_points
-            time_points = np.linspace(0, max_time, n_grid_points)
+            time_points = cast(List[float], np.linspace(0, max_time, n_grid_points))
         time_grid = np.array(time_points)
     
     # Handle censoring if specified
@@ -168,7 +168,8 @@ def _calculate_single_cif(
     
     # Check if we have competing risks to handle
     has_competing_risks = competing_risk_states is not None and len(competing_risk_states) > 0
-    competing_states = set(competing_risk_states) if has_competing_risks else set()
+    # Create an empty set or convert competing_risk_states to a set after checking it's not None
+    competing_states: Set[int] = set(competing_risk_states) if competing_risk_states is not None else set()
     
     # Group by simulation
     sim_groups = trajectories.groupby('simulation')

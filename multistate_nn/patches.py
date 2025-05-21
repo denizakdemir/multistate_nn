@@ -5,10 +5,12 @@ These patches are automatically applied when the module is imported.
 """
 
 import logging
+import torch
+from typing import Dict, Any, Callable, Optional, Union, cast, TypeVar, Tuple
 
 logger = logging.getLogger(__name__)
 
-def patch_torchdiffeq():
+def patch_torchdiffeq() -> bool:
     """
     Fix the rtol/atol duplication issue in torchdiffeq.odeint.
     
@@ -20,7 +22,17 @@ def patch_torchdiffeq():
         from torchdiffeq import odeint as original_odeint
         
         # Create a safe wrapper function
-        def safe_odeint(func, y0, t, *, rtol=1e-7, atol=1e-9, method=None, options=None, event_fn=None):
+        def safe_odeint(
+            func: Callable,
+            y0: torch.Tensor,
+            t: torch.Tensor,
+            *,
+            rtol: float = 1e-7,
+            atol: float = 1e-9,
+            method: Optional[str] = None,
+            options: Optional[Dict[str, Any]] = None,
+            event_fn: Optional[Callable] = None
+        ) -> torch.Tensor:
             """Wrapper around odeint that prevents duplicate rtol/atol."""
             # Create a clean copy of options without rtol/atol
             if options is not None:
@@ -29,7 +41,8 @@ def patch_torchdiffeq():
                 clean_options = None
             
             # Call original odeint with clean options
-            return original_odeint(func, y0, t, rtol=rtol, atol=atol, method=method, options=clean_options, event_fn=event_fn)
+            result = original_odeint(func, y0, t, rtol=rtol, atol=atol, method=method, options=clean_options, event_fn=event_fn)
+            return cast(torch.Tensor, result)
         
         # Apply the patch to our modules that use odeint
         import multistate_nn.models
@@ -48,7 +61,7 @@ def patch_torchdiffeq():
         logger.warning(f"Failed to patch torchdiffeq: {str(e)}")
         return False
 
-def apply_all_patches():
+def apply_all_patches() -> dict[str, bool]:
     """Apply all available patches."""
     patches = {
         "torchdiffeq": patch_torchdiffeq

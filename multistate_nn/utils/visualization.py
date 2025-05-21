@@ -1,6 +1,6 @@
 """Visualization utilities for continuous-time MultiStateNN models."""
 
-from typing import Optional, Dict, List, Union, Tuple, Any
+from typing import Optional, Dict, List, Union, Tuple, Any, cast
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -65,8 +65,8 @@ def plot_transition_heatmap(
         time_end = time_end.to(dtype=torch.float32)
     
     # Get probabilities for each input
-    all_probs = []
-    all_states = []
+    all_probs: List[np.ndarray] = []
+    all_states: List[List[int]] = []
     
     if from_state is not None:
         # Single starting state
@@ -225,11 +225,11 @@ def plot_transition_graph(
     nx.draw_networkx_labels(G, pos, font_size=font_size, ax=ax)
     
     # Draw edges with colors based on probability
-    cmap = plt.get_cmap(cmap)
+    colormap = plt.get_cmap(cmap)
     
     for u, v, p in edges:
         # Normalize probability to 0-1 range for color mapping
-        color = cmap(p / max_prob if max_prob > 0 else 0)
+        color = colormap(p / max_prob if max_prob > 0 else 0)
         # Width based on probability
         width = 1 + 5 * (p / max_prob if max_prob > 0 else 0)
         nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], width=width, edge_color=[color], 

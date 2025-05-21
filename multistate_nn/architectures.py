@@ -1,6 +1,6 @@
 """Neural architectures for intensity functions in continuous-time multistate models."""
 
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, cast
 
 import torch
 import torch.nn as nn
@@ -57,7 +57,7 @@ class MLPIntensityNetwork(IntensityNetwork):
         super().__init__()
         
         # Feature extractor
-        layers = []
+        layers: List[nn.Module] = []
         prev = input_dim
         for width in hidden_dims:
             layers.append(nn.Linear(prev, width))
@@ -112,7 +112,8 @@ class MLPIntensityNetwork(IntensityNetwork):
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
-        return A
+        # Use explicit casting to inform mypy about the return type
+        return cast(torch.Tensor, A)
 
 
 class RecurrentIntensityNetwork(IntensityNetwork):
@@ -148,7 +149,7 @@ class RecurrentIntensityNetwork(IntensityNetwork):
         
         # RNN for feature extraction
         if cell_type.lower() == "lstm":
-            self.rnn = nn.LSTM(
+            self.rnn: Union[nn.LSTM, nn.GRU] = nn.LSTM(
                 input_size=input_dim,
                 hidden_size=hidden_dim,
                 num_layers=num_layers,
@@ -235,7 +236,8 @@ class RecurrentIntensityNetwork(IntensityNetwork):
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
-        return A
+        # Use explicit casting to inform mypy about the return type
+        return cast(torch.Tensor, A)
 
 
 class AttentionIntensityNetwork(IntensityNetwork):
@@ -355,7 +357,8 @@ class AttentionIntensityNetwork(IntensityNetwork):
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
-        return A
+        # Use explicit casting to inform mypy about the return type
+        return cast(torch.Tensor, A)
 
 
 # Factory function to create intensity networks
@@ -364,7 +367,7 @@ def create_intensity_network(
     input_dim: int,
     num_states: int,
     state_transitions: Dict[int, List[int]],
-    **kwargs
+    **kwargs: Any
 ) -> IntensityNetwork:
     """Create intensity network based on architecture type.
     

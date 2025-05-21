@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union, Any, Hashable, cast, Sequence, Tuple
+from typing import Dict, List, Optional, Union, Any, Hashable, cast, Sequence, Tuple, Callable
 
 import torch
 import torch.nn as nn
@@ -95,7 +95,7 @@ class BaseMultiStateNN:
         time_start: Union[float, torch.Tensor] = 0.0,
         time_end: Union[float, torch.Tensor] = 1.0,
         from_state: int = 0,
-    ) -> torch.Tensor:
+    ) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
         """Predict transition probabilities.
         
         Parameters
@@ -111,12 +111,13 @@ class BaseMultiStateNN:
             
         Returns
         -------
-        torch.Tensor
-            Transition probabilities
+        Union[Dict[int, torch.Tensor], torch.Tensor]
+            Transition probabilities - either a dictionary mapping states to probabilities
+            or a tensor of probabilities depending on the implementation
         """
         return self.forward(x, time_start, time_end, from_state)
     
-    def summary(self, print_fn=print) -> Dict[str, Any]:
+    def summary(self, print_fn: Callable[..., None] = print) -> Dict[str, Any]:
         """Generate a summary of the model architecture and configuration.
         
         Parameters
@@ -233,13 +234,17 @@ class BaseMultiStateNN:
             time_end = time_end.to(dtype=torch.float32)
         
         # Get probabilities for each input
-        all_probs = []
-        all_states = []
+        all_probs: List[np.ndarray] = []
+        all_states: List[List[int]] = []
         
         if from_state is not None:
             # Single starting state
             probs = self.predict_proba(x, time_start=time_start, time_end=time_end, from_state=from_state)
-            probs = probs.detach().numpy()
+            # Cast to ensure type checker knows it's a tensor
+            if isinstance(probs, dict):
+                raise TypeError("predict_proba returned a dict, expected a tensor")
+            tensor_probs: torch.Tensor = probs
+            probs_np = tensor_probs.detach().cpu().numpy()
             
             # Get next states
             next_states = self.state_transitions[from_state]
@@ -248,7 +253,7 @@ class BaseMultiStateNN:
             col_names = [f"State {s}" for s in next_states]
             
             # Extract only the columns for valid transitions
-            filtered_probs = probs[:, next_states]
+            filtered_probs = probs_np[:, next_states]
             
             # Create heatmap data
             df = pd.DataFrame(filtered_probs, columns=col_names)
@@ -273,14 +278,19 @@ class BaseMultiStateNN:
                     continue
                     
                 probs = self.predict_proba(x[0:1], time_start=time_start, time_end=time_end, from_state=state)
-                probs = probs.detach().numpy()[0]
+                # Cast to ensure type checker knows it's a tensor
+                if isinstance(probs, dict):
+                    raise TypeError("predict_proba returned a dict, expected a tensor")
+                # Use a different variable name to avoid collision
+                tensor_probs2: torch.Tensor = probs
+                probs_np = tensor_probs2.detach().cpu().numpy()[0]
                 
                 next_states = self.state_transitions[state]
                 
                 for i, next_state in enumerate(next_states):
                     all_rows.append(state)
                     all_cols.append(next_state)
-                    all_values.append(probs[i])
+                    all_values.append(probs_np[i])
             
             # Reshape into a matrix
             matrix = np.zeros((num_states, num_states))
@@ -364,19 +374,24 @@ class BaseMultiStateNN:
                 continue
                 
             probs = self.predict_proba(x, time_start=time_start, time_end=time_end, from_state=from_state)
-            probs = probs.detach().numpy()[0]
+            # Cast to ensure type checker knows it's a tensor
+            if isinstance(probs, dict):
+                raise TypeError("predict_proba returned a dict, expected a tensor")
+            tensor_probs: torch.Tensor = probs
+            probs_np = tensor_probs.detach().cpu().numpy()[0]
             
             next_states = self.state_transitions[from_state]
             
             # Extract only probabilities for valid next states
-            filtered_probs = probs[next_states]
+            filtered_probs = probs_np[next_states]
             
             for i, to_state in enumerate(next_states):
                 prob = filtered_probs[i]
                 if prob > threshold:
                     G.add_edge(from_state, to_state, weight=prob, label=f"{prob:.3f}")
                     edges.append((from_state, to_state, prob))
-                    max_prob = max(max_prob, prob)
+                    # Convert tensor to float for max comparison
+                    max_prob = max(max_prob, float(prob))
         
         # Create plot
         fig, ax = plt.subplots(figsize=figsize)
@@ -464,8 +479,12 @@ class BaseMultiStateNN:
             else:
                 # Get probabilities from model
                 time_end = torch.tensor([float(t)], dtype=torch.float32, device=x.device)
-                p = self.predict_proba(x, time_start=time_start, time_end=time_end, from_state=from_state).detach()
-                probs[i] = p.squeeze().cpu().numpy()
+                p = self.predict_proba(x, time_start=time_start, time_end=time_end, from_state=from_state)
+                # Cast to ensure type checker knows it's a tensor
+                if isinstance(p, dict):
+                    raise TypeError("predict_proba returned a dict, expected a tensor")
+                tensor_p: torch.Tensor = p
+                probs[i] = tensor_p.detach().squeeze().cpu().numpy()
         
         # Plot probabilities
         for state in range(self.num_states):
@@ -588,7 +607,8 @@ class BaseMultiStateNN:
         model_class = getattr(model_module, model_type)
         
         # Create model instance - this will be delegated to subclass implementations
-        return model_class._create_from_config(config, directory, filename, device)
+        model: "BaseMultiStateNN" = model_class._create_from_config(config, directory, filename, device)
+        return model
 
 
 class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
@@ -704,7 +724,8 @@ class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
         A_diag = -torch.sum(A, dim=2)
         A = A + torch.diag_embed(A_diag)
         
-        return A
+        # Use cast to explicitly indicate return type to mypy
+        return cast(torch.Tensor, A)
     
     def ode_func(self, t: torch.Tensor, p: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         """ODE function: dp/dt = p·A.
@@ -728,9 +749,10 @@ class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
             # Add batch dimension for bmm
             p_batch = p.unsqueeze(1)  # batch_size x 1 x num_states
             result = torch.bmm(p_batch, A).squeeze(1)  # batch_size x num_states
-            return result
+            return cast(torch.Tensor, result)
         else:  # Full transition matrix (batch_size x num_states x num_states)
-            return torch.bmm(p, A)
+            result = torch.bmm(p, A)
+            return cast(torch.Tensor, result)
     
     def forward(
         self,
@@ -811,12 +833,15 @@ class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
         
         if from_state is not None:
             # Get probabilities for transitions from from_state to all states
-            return p_final
+            return cast(torch.Tensor, p_final)
         else:
             # Return dictionary with transitions for each state
-            return {i: p_final[:, i, self.state_transitions[i]] 
-                   if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
-                   for i in self.state_transitions}
+            result: Dict[int, torch.Tensor] = {
+                i: p_final[:, i, self.state_transitions[i]] 
+                if self.state_transitions[i] else torch.zeros((batch_size, 0), device=device) 
+                for i in self.state_transitions
+            }
+            return cast(Dict[int, torch.Tensor], result)
     
     @torch.no_grad()
     def predict_proba(
@@ -844,9 +869,15 @@ class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
         torch.Tensor
             Transition probabilities
         """
-        return self.forward(x, time_start, time_end, from_state)
+        # Cast the return value to ensure it's a tensor
+        result = self.forward(x, time_start, time_end, from_state)
+        if isinstance(result, dict):
+            raise TypeError("Expected tensor output but got dictionary. This should not happen when from_state is provided.")
+        # Explicitly cast and return to satisfy type checker
+        tensor_result: torch.Tensor = result
+        return tensor_result
         
-    def summary(self, print_fn=print) -> Dict[str, Any]:
+    def summary(self, print_fn: Callable[..., None] = print) -> Dict[str, Any]:
         """Generate a detailed summary of the continuous-time model.
         
         Extends the base summary method with continuous-time specific info.
@@ -1133,7 +1164,9 @@ class ContinuousMultiStateNN(nn.Module, BaseMultiStateNN):
             # Get state at or before this time for each simulation
             for sim_idx, traj in enumerate(trajectories):
                 # Find the index of the time point at or before t
-                idx = np.searchsorted(traj['time'].values, t)
+                # Convert Series.values to numpy array for np.searchsorted
+                time_values = np.array(traj['time'].values)
+                idx = np.searchsorted(time_values, t)
                 if idx == 0:
                     # If t is before the first time point, use the first state
                     state = traj.iloc[0]['state']

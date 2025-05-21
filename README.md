@@ -1,6 +1,9 @@
 # MultiStateNN: Neural Network Models for Continuous-Time Multistate Processes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python Package](https://github.com/denizakdemir/multistate_nn/actions/workflows/python-package.yml/badge.svg)](https://github.com/denizakdemir/multistate_nn/actions/workflows/python-package.yml)
+[![Documentation](https://github.com/denizakdemir/multistate_nn/actions/workflows/docs.yml/badge.svg)](https://github.com/denizakdemir/multistate_nn/actions/workflows/docs.yml)
+[![PyPI version](https://badge.fury.io/py/multistate-nn.svg)](https://badge.fury.io/py/multistate-nn)
 
 MultiStateNN is a PyTorch-based package implementing continuous-time multistate models using Neural Ordinary Differential Equations (Neural ODEs). It provides robust support for censored data as the default expectation in time-to-event analysis. The package supports both deterministic and Bayesian inference, making it suitable for modeling state transitions in various applications such as:
 

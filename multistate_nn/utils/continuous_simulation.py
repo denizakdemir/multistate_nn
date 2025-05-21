@@ -1,6 +1,6 @@
 """Simulation utilities for continuous-time multistate models."""
 
-from typing import Dict, List, Optional, Union, Sequence, Any
+from typing import Dict, List, Optional, Union, Sequence, Any, cast
 import numpy as np
 import pandas as pd
 import torch
@@ -105,7 +105,7 @@ def adjust_transitions_for_time(P: np.ndarray, time_diff: float) -> np.ndarray:
             return np.power(P, time_diff)
         else:  # 1xn vector
             # Normalize to ensure sum is 1 and return as is (assumes already in equilibrium)
-            return P / np.sum(P)
+            return cast(np.ndarray, P / np.sum(P))
     
     try:
         # Method 1: Matrix logarithm and exponential
@@ -126,7 +126,7 @@ def adjust_transitions_for_time(P: np.ndarray, time_diff: float) -> np.ndarray:
         row_sums = P_adjusted.sum(axis=1, keepdims=True)
         P_adjusted = P_adjusted / row_sums
         
-        return P_adjusted
+        return cast(np.ndarray, P_adjusted)
         
     except Exception as e:
         # Fallback: Use a simpler approximation with direct power
@@ -150,7 +150,7 @@ def adjust_transitions_for_time(P: np.ndarray, time_diff: float) -> np.ndarray:
                     row_sums = P_adjusted.sum(axis=1, keepdims=True)
                     P_adjusted = P_adjusted / row_sums
                     
-                    return P_adjusted
+                    return cast(np.ndarray, P_adjusted)
                 except np.linalg.LinAlgError:
                     # If eigendecomposition fails, just return integer power
                     return P_power
@@ -170,7 +170,7 @@ def adjust_transitions_for_time(P: np.ndarray, time_diff: float) -> np.ndarray:
                 row_sums = P_adjusted.sum(axis=1, keepdims=True)
                 P_adjusted = P_adjusted / row_sums
                 
-                return P_adjusted
+                return cast(np.ndarray, P_adjusted)
             else:
                 return np.eye(P.shape[0])
         else:
@@ -257,15 +257,15 @@ def simulate_continuous_patient_trajectory(
     for sim_idx in range(n_simulations):
         # Start with initial state
         current_state = start_state
-        states = [current_state]
-        times = [0.0]
+        states: List[int] = [current_state]
+        times: List[float] = [0.0]
         
         # Get censoring time for this simulation if censoring is enabled
         censoring_time = None
         censored = False
-        if enable_censoring:
+        if enable_censoring and censoring_times is not None:
             censoring_time = censoring_times[sim_idx]
-            if np.isfinite(censoring_time) and censoring_time <= max_time:
+            if censoring_time is not None and np.isfinite(censoring_time) and censoring_time <= max_time:
                 censored = True
         
         # Generate realization of continuous-time Markov chain
@@ -273,7 +273,7 @@ def simulate_continuous_patient_trajectory(
         
         while current_time < max_time and model.state_transitions[current_state]:
             # Check if we've reached censoring time
-            if censored and current_time >= censoring_time:
+            if censored and censoring_time is not None and current_time >= censoring_time:
                 break
             
             # Get transition rates from current state (the row of intensity matrix)
@@ -305,10 +305,11 @@ def simulate_continuous_patient_trajectory(
                 states.append(current_state)
                 times.append(max_time)
                 break
-            elif censored and new_time > censoring_time:
+            elif censored and censoring_time is not None and new_time > censoring_time:
                 # Include the final state at censoring time
                 states.append(current_state)
-                times.append(censoring_time)
+                # Cast censoring_time to float to ensure it's not None for mypy
+                times.append(float(censoring_time))
                 break
             
             # Choose the next state based on transition rates
